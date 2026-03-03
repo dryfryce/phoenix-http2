@@ -268,14 +268,16 @@ async fn worker(
     let ok  = Arc::new(std::sync::atomic::AtomicU64::new(0));
     let err = Arc::new(std::sync::atomic::AtomicU64::new(0));
 
-    // Spawn `concurrency` stream workers, each loops independently
+    // Spawn `concurrency` stream workers — each reconnects if connection drops
     let mut stream_handles = Vec::new();
     for stream_id in 0..concurrency {
         let uri     = uri.clone();
+        let url_str = url_str.clone();
         let mode    = mode.clone();
         let metrics = metrics.clone();
         let ok_c    = ok.clone();
         let err_c   = err.clone();
+        let caps    = caps.clone();
         let mut send = send.clone();
 
         let handle = tokio::spawn(async move {
@@ -293,9 +295,29 @@ async fn worker(
 
                 let t0 = Instant::now();
 
-                send = match send.ready().await {
-                    Ok(s)  => s,
-                    Err(e) => { debug!("stream {} ready err: {}", stream_id, e); break; }
+                // ready() moves send — get it back or reconnect
+                let ready_result = send.ready().await;
+                send = match ready_result {
+                    Ok(s) => s,
+                    Err(e) => {
+                        debug!("stream {} conn dropped ({}), reconnecting", stream_id, e);
+                        if start.elapsed() >= duration { break; }
+                        let url = match Url::parse(&url_str) { Ok(u) => u, Err(_) => break };
+                        let stream = match tls_connect(&url).await {
+                            Ok(s) => s,
+                            Err(_) => { tokio::time::sleep(Duration::from_millis(200)).await; break; }
+                        };
+                        let (ns, nc) = match client::Builder::new()
+                            .initial_window_size(caps.initial_window_size)
+                            .initial_connection_window_size(caps.initial_window_size)
+                            .handshake::<_, Bytes>(stream).await
+                        {
+                            Ok(v) => v,
+                            Err(_) => { tokio::time::sleep(Duration::from_millis(200)).await; break; }
+                        };
+                        tokio::spawn(async move { let _ = nc.await; });
+                        ns
+                    }
                 };
 
                 match mode {

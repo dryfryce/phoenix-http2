@@ -4,6 +4,7 @@ use indicatif::{ProgressBar, ProgressStyle};
 use phoenix_attacks::{
     Attack, AttackContext, RapidResetAttack, ContinuationFloodAttack,
     HpackBombAttack, SettingsFloodAttack, PingFloodAttack, LoadTestAttack,
+    UniversalAttack,
 };
 use phoenix_metrics::AttackMetrics;
 use phoenix_metrics::MetricsSnapshot as AttackSnapshot;
@@ -72,17 +73,21 @@ enum AttackType {
     SettingsFlood,
     PingFlood,
     LoadTest,
+    Universal,
+    UniversalReset,
 }
 
 impl std::fmt::Display for AttackType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            AttackType::RapidReset       => write!(f, "rapid-reset"),
+            AttackType::RapidReset        => write!(f, "rapid-reset"),
             AttackType::ContinuationFlood => write!(f, "continuation-flood"),
-            AttackType::HpackBomb        => write!(f, "hpack-bomb"),
-            AttackType::SettingsFlood    => write!(f, "settings-flood"),
-            AttackType::PingFlood        => write!(f, "ping-flood"),
-            AttackType::LoadTest         => write!(f, "load-test"),
+            AttackType::HpackBomb         => write!(f, "hpack-bomb"),
+            AttackType::SettingsFlood     => write!(f, "settings-flood"),
+            AttackType::PingFlood         => write!(f, "ping-flood"),
+            AttackType::LoadTest          => write!(f, "load-test"),
+            AttackType::Universal         => write!(f, "universal"),
+            AttackType::UniversalReset    => write!(f, "universal-reset"),
         }
     }
 }
@@ -147,6 +152,18 @@ async fn run_attack(args: &AttackArgs) -> anyhow::Result<AttackSnapshot> {
                 .with_connection_count(args.connections)
                 .with_target_rps(rps.unwrap_or(0))
                 .with_duration(args.duration),
+        ),
+        AttackType::Universal => Box::new(
+            UniversalAttack::load_test()
+                .with_connections(args.connections)
+                .with_duration(args.duration)
+                .with_rps(rps.unwrap_or(100)),
+        ),
+        AttackType::UniversalReset => Box::new(
+            UniversalAttack::rapid_reset()
+                .with_connections(args.connections)
+                .with_duration(args.duration)
+                .with_rps(rps.unwrap_or(1000)),
         ),
     };
 

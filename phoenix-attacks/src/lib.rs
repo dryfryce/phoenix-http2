@@ -12,6 +12,7 @@ pub mod load_test;
 pub mod ping_flood;
 pub mod rapid_reset;
 pub mod settings_flood;
+pub mod universal;
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -28,6 +29,7 @@ pub use load_test::LoadTestAttack;
 pub use ping_flood::PingFloodAttack;
 pub use rapid_reset::RapidResetAttack;
 pub use settings_flood::SettingsFloodAttack;
+pub use universal::UniversalAttack;
 
 /// Error type for attack execution failures
 #[derive(Error, Debug)]

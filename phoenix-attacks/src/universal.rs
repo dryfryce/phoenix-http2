@@ -262,7 +262,7 @@ async fn worker(
     let start = Instant::now();
     // Concurrent streams per connection — HTTP/2 multiplexing
     // Use min(caps.max_concurrent_streams, 32) parallel streams per conn
-    let concurrency = caps.max_concurrent_streams.min(16) as usize;
+    let concurrency = 1usize; // 1 sequential stream per connection, scale via connections
 
     // Shared counters
     let ok  = Arc::new(std::sync::atomic::AtomicU64::new(0));
@@ -340,33 +340,27 @@ async fn worker(
                     UniversalMode::LoadTest => {
                         match send.send_request(req, true) {
                             Err(e) => {
-                                debug!("stream {} send err: {}", stream_id, e);
+                                debug!("send err: {}", e);
                                 err_c.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                             }
                             Ok((resp_f, _)) => {
-                                // Drain response in background — don't block next request
-                                let ok_c2  = ok_c.clone();
-                                let err_c2 = err_c.clone();
-                                let metrics2 = metrics.clone();
-                                tokio::spawn(async move {
-                                    match tokio::time::timeout(Duration::from_secs(5), resp_f).await {
-                                        Ok(Ok(resp)) => {
-                                            let status  = resp.status().as_u16();
-                                            let success = status < 400;
-                                            let mut body = resp.into_body();
-                                            while let Some(chunk) = body.data().await {
-                                                if let Ok(data) = chunk {
-                                                    let _ = body.flow_control().release_capacity(data.len());
-                                                }
+                                match tokio::time::timeout(Duration::from_secs(5), resp_f).await {
+                                    Ok(Ok(resp)) => {
+                                        let status  = resp.status().as_u16();
+                                        let success = status < 400;
+                                        let mut body = resp.into_body();
+                                        while let Some(chunk) = body.data().await {
+                                            if let Ok(data) = chunk {
+                                                let _ = body.flow_control().release_capacity(data.len());
                                             }
-                                            let lat = t0.elapsed().as_micros() as u64;
-                                            metrics2.record_request(lat, success, 0).await;
-                                            if success { ok_c2.fetch_add(1, std::sync::atomic::Ordering::Relaxed); }
-                                            else       { err_c2.fetch_add(1, std::sync::atomic::Ordering::Relaxed); }
                                         }
-                                        _ => { err_c2.fetch_add(1, std::sync::atomic::Ordering::Relaxed); }
+                                        let lat = t0.elapsed().as_micros() as u64;
+                                        metrics.record_request(lat, success, 0).await;
+                                        if success { ok_c.fetch_add(1, std::sync::atomic::Ordering::Relaxed); }
+                                        else       { err_c.fetch_add(1, std::sync::atomic::Ordering::Relaxed); }
                                     }
-                                });
+                                    _ => { err_c.fetch_add(1, std::sync::atomic::Ordering::Relaxed); }
+                                }
                             }
                         }
                     }

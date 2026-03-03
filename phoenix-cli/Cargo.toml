@@ -1,0 +1,27 @@
+[package]
+name = "phoenix-cli"
+version = "0.1.0"
+edition = "2021"
+description = "HTTP/2 Stress & Security Testing Framework"
+license = "MIT"
+authors = ["Phoenix Team"]
+repository = "https://github.com/phoenix-http2/phoenix"
+
+[dependencies]
+clap = { version = "4.4", features = ["derive"] }
+colored = "2.1"
+tokio = { version = "1.0", features = ["macros", "rt-multi-thread", "time"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+chrono = { version = "0.4", features = ["serde"] }
+indicatif = "0.17"
+phoenix-report = { path = "../phoenix-report" }
+anyhow = "1.0"
+rand = "0.8"
+
+[dev-dependencies]
+tempfile = "3.10"
+
+[[bin]]
+name = "phoenix"
+path = "src/main.rs"

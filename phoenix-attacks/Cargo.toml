@@ -1,0 +1,31 @@
+[package]
+name = "phoenix-attacks"
+version = "0.1.0"
+edition = "2021"
+authors = ["Phoenix Project"]
+license = "MIT"
+repository = "https://github.com/dryfryce/phoenix"
+description = "Attack modules for Phoenix HTTP/2 stress testing framework"
+readme = "README.md"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+phoenix-core = { path = "../phoenix-core" }
+phoenix-metrics = { path = "../phoenix-metrics" }
+tokio = { version = "1.36", features = ["full"] }
+bytes = "1"
+governor = "0.5"
+anyhow = "1"
+thiserror = "1"
+tracing = "0.1"
+futures = "0.3"
+async-trait = "0.1"
+h2 = "0.3"
+hyper = { version = "0.14", features = ["http2"] }
+http = "0.2"
+# url = "2"  # Temporarily removed due to dependency issues
+rand = "0.8"
+
+[dev-dependencies]
+tokio = { version = "1.36", features = ["full", "test-util"] }

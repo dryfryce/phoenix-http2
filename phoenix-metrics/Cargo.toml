@@ -1,0 +1,20 @@
+[package]
+name = "phoenix-metrics"
+version = "0.1.0"
+edition = "2021"
+description = "Metrics and terminal UI crate for Phoenix HTTP/2 stress testing framework"
+authors = ["Phoenix Framework"]
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+hdrhistogram = "7"
+tokio = { version = "1.36", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+chrono = { version = "0.4", features = ["serde"] }
+tracing = "0.1"
+ratatui = "0.26"
+crossterm = "0.27"
+
+[dev-dependencies]
+tokio = { version = "1.36", features = ["full"] }

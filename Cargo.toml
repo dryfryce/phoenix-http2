@@ -1,0 +1,70 @@
+[workspace]
+members = [
+    "phoenix-cli",
+    "phoenix-core",
+    "phoenix-attacks",
+    "phoenix-metrics",
+    "phoenix-report",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+authors = ["Phoenix Project"]
+license = "MIT"
+repository = "https://github.com/dryfryce/phoenix"
+
+[workspace.dependencies]
+# Async runtime
+tokio = { version = "1.36", features = ["full"] }
+tokio-rustls = "0.26"
+futures = "0.3"
+futures-util = "0.3"
+
+# TLS
+rustls = { version = "0.23", features = ["ring"] }
+rustls-native-certs = "0.7"
+webpki-roots = "0.26"
+
+# HTTP/2
+h2 = "0.4"
+hyper = { version = "1", features = ["http2"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+http = "1"
+
+# Bytes / frame building
+bytes = "1"
+
+# Metrics
+hdrhistogram = "7"
+metrics = "0.23"
+
+# CLI
+clap = { version = "4", features = ["derive", "color"] }
+
+# Terminal UI
+ratatui = "0.26"
+crossterm = "0.27"
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+
+# Error handling
+thiserror = "1"
+anyhow = "1"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Utilities
+url = "2"
+indicatif = "0.17"
+colored = "2"
+humantime = "2"
+chrono = { version = "0.4", features = ["serde"] }
+governor = "0.6"
+socket2 = "0.5"

@@ -268,18 +268,30 @@ impl RawH2TlsConnection {
         let settings_frame = build_settings_frame();
         self.send_frame(settings_frame).await?;
         
-        // Read and acknowledge server's SETTINGS
-        let server_frame = self.read_frame().await?;
-        if server_frame.frame_type != crate::frame::SETTINGS {
-            return Err(PhoenixError::protocol(
-                format!("Expected SETTINGS frame, got type {}", server_frame.frame_type)
-            ));
+        // Read frames until we get the server SETTINGS frame.
+        // nginx (and many servers) send WINDOW_UPDATE (type 8) before or
+        // alongside SETTINGS — we must skip those gracefully.
+        loop {
+            let frame = self.read_frame().await?;
+            match frame.frame_type {
+                crate::frame::SETTINGS => {
+                    // Only ACK if it's not itself an ACK (flag 0x1)
+                    if frame.flags & 0x1 == 0 {
+                        let settings_ack = build_settings_ack();
+                        self.send_frame(settings_ack).await?;
+                    }
+                    break;
+                }
+                // WINDOW_UPDATE (8), PING (6) — safe to skip during handshake
+                8 | 6 => continue,
+                other => {
+                    return Err(PhoenixError::protocol(
+                        format!("Unexpected frame type {} during handshake", other)
+                    ));
+                }
+            }
         }
-        
-        // Send SETTINGS ACK
-        let settings_ack = build_settings_ack();
-        self.send_frame(settings_ack).await?;
-        
+
         Ok(())
     }
 }

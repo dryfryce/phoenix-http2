@@ -295,11 +295,26 @@ async fn worker(
 
                 let t0 = Instant::now();
 
-                // ready() moves send — get it back or reconnect
-                let ready_result = send.ready().await;
+                // ready() with 3s timeout — if stalled, reconnect
+                let ready_result = tokio::time::timeout(
+                    Duration::from_secs(3),
+                    send.ready()
+                ).await;
                 send = match ready_result {
-                    Ok(s) => s,
-                    Err(e) => {
+                    Err(_timeout) => {
+                        debug!("stream {} ready timeout — reconnecting", stream_id);
+                        if start.elapsed() >= duration { break; }
+                        let url = match Url::parse(&url_str) { Ok(u) => u, Err(_) => break };
+                        let stream = match tls_connect(&url).await { Ok(s) => s, Err(_) => break };
+                        let (ns, nc) = match client::Builder::new()
+                            .initial_window_size(caps.initial_window_size)
+                            .initial_connection_window_size(caps.initial_window_size)
+                            .handshake::<_, Bytes>(stream).await
+                        { Ok(v) => v, Err(_) => break };
+                        tokio::spawn(async move { let _ = nc.await; });
+                        ns
+                    }
+                    Ok(Err(e)) => {
                         debug!("stream {} conn dropped ({}), reconnecting", stream_id, e);
                         if start.elapsed() >= duration { break; }
                         let url = match Url::parse(&url_str) { Ok(u) => u, Err(_) => break };
@@ -318,6 +333,7 @@ async fn worker(
                         tokio::spawn(async move { let _ = nc.await; });
                         ns
                     }
+                    Ok(Ok(s)) => s,
                 };
 
                 match mode {

@@ -344,29 +344,29 @@ async fn worker(
                                 err_c.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                             }
                             Ok((resp_f, _)) => {
-                                match tokio::time::timeout(Duration::from_secs(5), resp_f).await.unwrap_or_else(|_| Err(h2::Error::from(h2::Reason::CANCEL))) {
-                                    Err(_) => {
-                                        err_c.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                                    }
-                                    Ok(resp) => {
-                                        let status  = resp.status().as_u16();
-                                        let success = status < 400;
-                                        // Drain body — critical for flow control
-                                        let mut body = resp.into_body();
-                                        while let Some(chunk) = body.data().await {
-                                            if let Ok(data) = chunk {
-                                                let _ = body.flow_control().release_capacity(data.len());
+                                // Drain response in background — don't block next request
+                                let ok_c2  = ok_c.clone();
+                                let err_c2 = err_c.clone();
+                                let metrics2 = metrics.clone();
+                                tokio::spawn(async move {
+                                    match tokio::time::timeout(Duration::from_secs(5), resp_f).await {
+                                        Ok(Ok(resp)) => {
+                                            let status  = resp.status().as_u16();
+                                            let success = status < 400;
+                                            let mut body = resp.into_body();
+                                            while let Some(chunk) = body.data().await {
+                                                if let Ok(data) = chunk {
+                                                    let _ = body.flow_control().release_capacity(data.len());
+                                                }
                                             }
+                                            let lat = t0.elapsed().as_micros() as u64;
+                                            metrics2.record_request(lat, success, 0).await;
+                                            if success { ok_c2.fetch_add(1, std::sync::atomic::Ordering::Relaxed); }
+                                            else       { err_c2.fetch_add(1, std::sync::atomic::Ordering::Relaxed); }
                                         }
-                                        let lat = t0.elapsed().as_micros() as u64;
-                                        metrics.record_request(lat, success, 0).await;
-                                        if success {
-                                            ok_c.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                                        } else {
-                                            err_c.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                                        }
+                                        _ => { err_c2.fetch_add(1, std::sync::atomic::Ordering::Relaxed); }
                                     }
-                                }
+                                });
                             }
                         }
                     }

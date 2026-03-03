@@ -226,6 +226,16 @@ async fn run_scan(args: &ScanArgs) -> anyhow::Result<()> {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    // Init logging
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"))
+        )
+        .with_target(false)
+        .compact()
+        .init();
+
     // Install rustls crypto provider (required before any TLS connections)
     rustls::crypto::ring::default_provider()
         .install_default()

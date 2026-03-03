@@ -14,7 +14,8 @@ phoenix-metrics = { path = "../phoenix-metrics" }
 phoenix-report  = { path = "../phoenix-report" }
 tokio           = { version = "1.36", features = ["full"] }
 clap            = { version = "4", features = ["derive", "color"] }
-anyhow          = "1"
+anyhow               = "1"
+tracing-subscriber   = { version = "0.3", features = ["env-filter"] }
 rustls          = { version = "0.23", features = ["ring"] }
 colored         = "2"
 indicatif       = "0.17"

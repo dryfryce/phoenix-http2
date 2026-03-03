@@ -2,12 +2,12 @@
 
 use std::sync::Arc;
 use std::time::Duration;
-use std::io::{self, stdout};
+use std::io::stdout;
 use std::error::Error;
 
 use ratatui::{
-    backend::{Backend, CrosstermBackend},
-    layout::{Constraint, Direction, Layout, Rect},
+    backend::CrosstermBackend,
+    layout::{Constraint, Direction, Layout},
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, Paragraph, Row, Table, Gauge},
@@ -76,8 +76,8 @@ impl PhoenixDashboard {
 
             // Update at 10Hz
             if last_update.elapsed() >= Duration::from_millis(100) {
+                let snapshot = metrics.snapshot().await;
                 terminal.draw(|f| {
-                    let snapshot = futures::executor::block_on(metrics.snapshot());
                     Self::render(f, &snapshot, &self);
                 })?;
                 last_update = std::time::Instant::now();
@@ -114,7 +114,7 @@ impl PhoenixDashboard {
     }
 
     /// Render the dashboard UI
-    pub fn render<B: Backend>(frame: &mut Frame<B>, snapshot: &MetricsSnapshot, dashboard: &PhoenixDashboard) {
+    pub fn render(frame: &mut Frame, snapshot: &MetricsSnapshot, dashboard: &PhoenixDashboard) {
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .margin(1)
@@ -156,35 +156,22 @@ impl PhoenixDashboard {
         frame.render_widget(info_block, chunks[1]);
 
         // Live counters
+        let rps = format!("{:.1}", snapshot.requests_per_second);
+        let total_req = format!("{}", snapshot.counters.requests_sent);
+        let success = format!("{}", snapshot.counters.requests_success);
+        let errors = format!("{}", snapshot.counters.requests_error);
+        let active_conn = format!("{}", snapshot.counters.connections_active);
+        let bytes_sent_mb = format!("{:.2} MB", snapshot.counters.bytes_sent as f64 / 1_000_000.0);
+        let bytes_recv_mb = format!("{:.2} MB", snapshot.counters.bytes_received as f64 / 1_000_000.0);
+        
         let counters_data = vec![
-            Row::new(vec![
-                "Req/s",
-                &format!("{:.1}", snapshot.requests_per_second),
-            ]),
-            Row::new(vec![
-                "Total Requests",
-                &format!("{}", snapshot.counters.requests_sent),
-            ]),
-            Row::new(vec![
-                "Success",
-                &format!("{}", snapshot.counters.requests_success),
-            ]),
-            Row::new(vec![
-                "Errors",
-                &format!("{}", snapshot.counters.requests_error),
-            ]),
-            Row::new(vec![
-                "Active Connections",
-                &format!("{}", snapshot.counters.connections_active),
-            ]),
-            Row::new(vec![
-                "Bytes Sent",
-                &format!("{:.2} MB", snapshot.counters.bytes_sent as f64 / 1_000_000.0),
-            ]),
-            Row::new(vec![
-                "Bytes Received",
-                &format!("{:.2} MB", snapshot.counters.bytes_received as f64 / 1_000_000.0),
-            ]),
+            Row::new(vec!["Req/s", &rps]),
+            Row::new(vec!["Total Requests", &total_req]),
+            Row::new(vec!["Success", &success]),
+            Row::new(vec!["Errors", &errors]),
+            Row::new(vec!["Active Connections", &active_conn]),
+            Row::new(vec!["Bytes Sent", &bytes_sent_mb]),
+            Row::new(vec!["Bytes Received", &bytes_recv_mb]),
         ];
         
         let counters_table = Table::new(counters_data, &[Constraint::Length(20), Constraint::Length(20)])
@@ -194,35 +181,22 @@ impl PhoenixDashboard {
         frame.render_widget(counters_table, chunks[2]);
 
         // Latency table
+        let p50 = format!("{:.2} ms", snapshot.latency.p50 as f64 / 1000.0);
+        let p95 = format!("{:.2} ms", snapshot.latency.p95 as f64 / 1000.0);
+        let p99 = format!("{:.2} ms", snapshot.latency.p99 as f64 / 1000.0);
+        let p999 = format!("{:.2} ms", snapshot.latency.p999 as f64 / 1000.0);
+        let min = format!("{:.2} ms", snapshot.latency.min as f64 / 1000.0);
+        let max = format!("{:.2} ms", snapshot.latency.max as f64 / 1000.0);
+        let mean = format!("{:.2} ms", snapshot.latency.mean as f64 / 1000.0);
+        
         let latency_data = vec![
-            Row::new(vec![
-                "p50",
-                &format!("{:.2} ms", snapshot.latency.p50 as f64 / 1000.0),
-            ]),
-            Row::new(vec![
-                "p95",
-                &format!("{:.2} ms", snapshot.latency.p95 as f64 / 1000.0),
-            ]),
-            Row::new(vec![
-                "p99",
-                &format!("{:.2} ms", snapshot.latency.p99 as f64 / 1000.0),
-            ]),
-            Row::new(vec![
-                "p99.9",
-                &format!("{:.2} ms", snapshot.latency.p999 as f64 / 1000.0),
-            ]),
-            Row::new(vec![
-                "Min",
-                &format!("{:.2} ms", snapshot.latency.min as f64 / 1000.0),
-            ]),
-            Row::new(vec![
-                "Max",
-                &format!("{:.2} ms", snapshot.latency.max as f64 / 1000.0),
-            ]),
-            Row::new(vec![
-                "Mean",
-                &format!("{:.2} ms", snapshot.latency.mean as f64 / 1000.0),
-            ]),
+            Row::new(vec!["p50", &p50]),
+            Row::new(vec!["p95", &p95]),
+            Row::new(vec!["p99", &p99]),
+            Row::new(vec!["p99.9", &p999]),
+            Row::new(vec!["Min", &min]),
+            Row::new(vec!["Max", &max]),
+            Row::new(vec!["Mean", &mean]),
         ];
         
         let latency_table = Table::new(latency_data, &[Constraint::Length(10), Constraint::Length(15)])

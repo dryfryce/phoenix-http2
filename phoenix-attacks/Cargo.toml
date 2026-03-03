@@ -24,7 +24,7 @@ async-trait = "0.1"
 h2 = "0.3"
 hyper = { version = "0.14", features = ["http2"] }
 http = "0.2"
-# url = "2"  # Temporarily removed due to dependency issues
+url = "2"
 rand = "0.8"
 
 [dev-dependencies]

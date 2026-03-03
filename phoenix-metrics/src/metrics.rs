@@ -1,7 +1,7 @@
 //! Combined metrics for HTTP/2 stress testing
 
 use std::sync::Arc;
-use std::time::{Instant, Duration};
+use std::time::Instant;
 use serde::{Deserialize, Serialize};
 use chrono::{DateTime, Utc};
 

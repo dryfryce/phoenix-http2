@@ -9,12 +9,64 @@ use std::time::Duration;
 use bytes::Bytes;
 
 use rustls::ClientConfig;
-use rustls::pki_types::ServerName;
+use rustls::pki_types::{ServerName, CertificateDer, UnixTime};
+use rustls::client::danger::{ServerCertVerifier, ServerCertVerified, HandshakeSignatureValid};
+use rustls::DigitallySignedStruct;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadHalf, WriteHalf};
 use tokio::net::TcpStream;
 use tokio::time::timeout;
 use tokio_rustls::TlsConnector;
 use url::Url;
+
+/// No-op TLS certificate verifier — accepts any cert including self-signed.
+/// Used for testing against targets with self-signed certificates.
+#[derive(Debug)]
+struct NoVerifier;
+
+impl ServerCertVerifier for NoVerifier {
+    fn verify_server_cert(
+        &self,
+        _end_entity: &CertificateDer<'_>,
+        _intermediates: &[CertificateDer<'_>],
+        _server_name: &ServerName<'_>,
+        _ocsp_response: &[u8],
+        _now: UnixTime,
+    ) -> std::result::Result<ServerCertVerified, rustls::Error> {
+        Ok(ServerCertVerified::assertion())
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        _message: &[u8],
+        _cert: &CertificateDer<'_>,
+        _dss: &DigitallySignedStruct,
+    ) -> std::result::Result<HandshakeSignatureValid, rustls::Error> {
+        Ok(HandshakeSignatureValid::assertion())
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        _message: &[u8],
+        _cert: &CertificateDer<'_>,
+        _dss: &DigitallySignedStruct,
+    ) -> std::result::Result<HandshakeSignatureValid, rustls::Error> {
+        Ok(HandshakeSignatureValid::assertion())
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
+        vec![
+            rustls::SignatureScheme::RSA_PKCS1_SHA256,
+            rustls::SignatureScheme::RSA_PKCS1_SHA384,
+            rustls::SignatureScheme::RSA_PKCS1_SHA512,
+            rustls::SignatureScheme::ECDSA_NISTP256_SHA256,
+            rustls::SignatureScheme::ECDSA_NISTP384_SHA384,
+            rustls::SignatureScheme::RSA_PSS_SHA256,
+            rustls::SignatureScheme::RSA_PSS_SHA384,
+            rustls::SignatureScheme::RSA_PSS_SHA512,
+            rustls::SignatureScheme::ED25519,
+        ]
+    }
+}
 
 use crate::error::PhoenixError;
 use crate::frame::{Frame, build_settings_frame, build_settings_ack};
@@ -177,16 +229,11 @@ impl RawH2TlsConnection {
         tcp_stream: TcpStream,
         host: &str,
     ) -> Result<tokio_rustls::client::TlsStream<TcpStream>> {
-        // Create root certificate store using webpki-roots
-        let root_store = {
-            let mut store = rustls::RootCertStore::empty();
-            store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
-            store
-        };
-        
-        // Create TLS client config
+        // Use no-op verifier — accepts self-signed certs for test targets.
+        // For production scanning, swap NoVerifier for webpki_roots store.
         let config = ClientConfig::builder()
-            .with_root_certificates(root_store)
+            .dangerous()
+            .with_custom_certificate_verifier(Arc::new(NoVerifier))
             .with_no_client_auth();
         
         let server_name = ServerName::try_from(host.to_string())

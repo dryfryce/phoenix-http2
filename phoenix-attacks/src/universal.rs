@@ -262,7 +262,7 @@ async fn worker(
     let start = Instant::now();
     // Concurrent streams per connection — HTTP/2 multiplexing
     // Use min(caps.max_concurrent_streams, 32) parallel streams per conn
-    let concurrency = 1usize; // 1 sequential stream per connection, scale via connections
+    let concurrency = 10usize; // 10 streams per connection
 
     // Shared counters
     let ok  = Arc::new(std::sync::atomic::AtomicU64::new(0));

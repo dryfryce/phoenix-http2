@@ -264,8 +264,6 @@ async fn main() -> anyhow::Result<()> {
     match cli.command {
         Commands::Attack(args) => {
             SummaryPrinter::print_ethical_warning();
-            println!("\n{}", "Starting in 3 seconds...".yellow());
-            sleep(Duration::from_secs(3)).await;
 
             let snapshot = run_attack(&args).await?;
 

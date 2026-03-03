@@ -226,6 +226,11 @@ async fn run_scan(args: &ScanArgs) -> anyhow::Result<()> {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    // Install rustls crypto provider (required before any TLS connections)
+    rustls::crypto::ring::default_provider()
+        .install_default()
+        .expect("Failed to install rustls crypto provider");
+
     SummaryPrinter::print_banner();
     let cli = Cli::parse();
 

@@ -262,7 +262,7 @@ async fn worker(
     let start = Instant::now();
     // Concurrent streams per connection — HTTP/2 multiplexing
     // Use min(caps.max_concurrent_streams, 32) parallel streams per conn
-    let concurrency = caps.max_concurrent_streams.min(32) as usize;
+    let concurrency = caps.max_concurrent_streams.min(8) as usize;
 
     // Shared counters
     let ok  = Arc::new(std::sync::atomic::AtomicU64::new(0));
@@ -328,7 +328,7 @@ async fn worker(
                                 err_c.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                             }
                             Ok((resp_f, _)) => {
-                                match resp_f.await {
+                                match tokio::time::timeout(Duration::from_secs(5), resp_f).await.unwrap_or_else(|_| Err(h2::Error::from(h2::Reason::CANCEL))) {
                                     Err(_) => {
                                         err_c.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                                     }

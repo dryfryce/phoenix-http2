@@ -1,0 +1,93 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Phoenix HTTP/2 Test Target 🔥</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: #0a0a0f; color: #e0e0e0; font-family: 'Courier New', monospace; }
+  .header { background: linear-gradient(135deg, #1a0505, #2d0808); border-bottom: 2px solid #ca3628; padding: 24px 40px; }
+  .header h1 { font-size: 2rem; color: #f8b918; letter-spacing: 0.1em; }
+  .header p { color: #888; margin-top: 6px; font-size: 0.9rem; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px,1fr)); gap: 20px; padding: 32px 40px; }
+  .card { background: #111118; border: 1px solid #2a2a3a; border-radius: 8px; padding: 24px; }
+  .card h3 { color: #f8b918; font-size: 0.85rem; letter-spacing: 0.2em; text-transform: uppercase; margin-bottom: 16px; }
+  .stat { display: flex; justify-content: space-between; padding: 8px 0; border-bottom: 1px solid #1a1a2a; }
+  .stat:last-child { border: none; }
+  .stat-label { color: #666; font-size: 0.85rem; }
+  .stat-value { color: #4af; font-weight: bold; font-size: 0.9rem; }
+  .green { color: #4f4 !important; }
+  .red { color: #f44 !important; }
+  .yellow { color: #fa4 !important; }
+  .badge { display: inline-block; padding: 2px 10px; border-radius: 12px; font-size: 0.75rem; font-weight: bold; }
+  .badge-green { background: #1a3a1a; color: #4f4; border: 1px solid #4f4; }
+  .badge-blue { background: #1a2a3a; color: #4af; border: 1px solid #4af; }
+  .endpoints { padding: 0 40px 32px; }
+  .endpoints h2 { color: #f8b918; margin-bottom: 16px; font-size: 1rem; letter-spacing: 0.1em; text-transform: uppercase; }
+  .ep { background: #111118; border: 1px solid #2a2a3a; border-radius: 6px; padding: 12px 16px; margin-bottom: 8px; display: flex; align-items: center; gap: 16px; }
+  .ep-method { color: #4af; font-size: 0.8rem; font-weight: bold; width: 50px; }
+  .ep-path { color: #e0e0e0; font-size: 0.9rem; }
+  .ep-desc { color: #666; font-size: 0.8rem; margin-left: auto; }
+  footer { text-align: center; padding: 24px; color: #333; font-size: 0.8rem; border-top: 1px solid #1a1a2a; }
+</style>
+</head>
+<body>
+<div class="header">
+  <h1>🔥 Phoenix HTTP/2 Test Target</h1>
+  <p>Configured for stress testing and security research | HTTP/2 + TLS 1.3</p>
+</div>
+
+<div class="grid">
+  <div class="card">
+    <h3>Server Info</h3>
+    <div class="stat"><span class="stat-label">Protocol</span><span class="stat-value green">HTTP/2</span></div>
+    <div class="stat"><span class="stat-label">TLS</span><span class="stat-value green">TLS 1.3</span></div>
+    <div class="stat"><span class="stat-label">Server</span><span class="stat-value">nginx/1.18</span></div>
+    <div class="stat"><span class="stat-label">Status</span><span class="stat-value"><span class="badge badge-green">ONLINE</span></span></div>
+  </div>
+  <div class="card">
+    <h3>Live Connections</h3>
+    <div class="stat"><span class="stat-label">Active</span><span id="active-conn" class="stat-value">—</span></div>
+    <div class="stat"><span class="stat-label">Waiting</span><span id="waiting-conn" class="stat-value">—</span></div>
+    <div class="stat"><span class="stat-label">Total</span><span id="total-conn" class="stat-value">—</span></div>
+    <div class="stat"><span class="stat-label">Requests</span><span id="total-req" class="stat-value">—</span></div>
+  </div>
+  <div class="card">
+    <h3>HTTP/2 Test Endpoints</h3>
+    <div class="stat"><span class="stat-label">/</span><span class="stat-value badge badge-blue">Main page</span></div>
+    <div class="stat"><span class="stat-label">/health</span><span class="stat-value badge badge-green">Health check</span></div>
+    <div class="stat"><span class="stat-label">/stats</span><span class="stat-value badge badge-blue">Live stats JSON</span></div>
+    <div class="stat"><span class="stat-label">/heavy</span><span class="stat-value badge badge-blue">Heavy endpoint</span></div>
+    <div class="stat"><span class="stat-label">/dashboard</span><span class="stat-value badge badge-blue">Analytics</span></div>
+  </div>
+</div>
+
+<div class="endpoints">
+  <h2>Test Endpoints</h2>
+  <div class="ep"><span class="ep-method">GET</span><span class="ep-path">/health</span><span class="ep-desc">200 OK — liveness check</span></div>
+  <div class="ep"><span class="ep-method">GET</span><span class="ep-path">/stats</span><span class="ep-desc">JSON — live nginx connection stats</span></div>
+  <div class="ep"><span class="ep-method">GET</span><span class="ep-path">/heavy</span><span class="ep-desc">Simulated heavy endpoint (50ms delay)</span></div>
+  <div class="ep"><span class="ep-method">GET</span><span class="ep-path">/small</span><span class="ep-desc">Tiny 1-byte response — max throughput test</span></div>
+  <div class="ep"><span class="ep-method">GET</span><span class="ep-path">/dashboard</span><span class="ep-desc">Real-time analytics dashboard</span></div>
+  <div class="ep"><span class="ep-method">GET</span><span class="ep-path">/metrics</span><span class="ep-desc">Prometheus metrics</span></div>
+</div>
+
+<footer>Phoenix HTTP/2 Test Target · For authorized security research only</footer>
+
+<script>
+async function refreshStats() {
+  try {
+    const r = await fetch('/stats');
+    const d = await r.json();
+    document.getElementById('active-conn').textContent = d.active_connections ?? '—';
+    document.getElementById('waiting-conn').textContent = d.waiting_connections ?? '—';
+    document.getElementById('total-conn').textContent = d.total_connections ?? '—';
+    document.getElementById('total-req').textContent = d.total_requests ?? '—';
+  } catch(e) {}
+}
+refreshStats();
+setInterval(refreshStats, 2000);
+</script>
+</body>
+</html>

@@ -1,0 +1,11 @@
+[Unit]
+Description=Phoenix Analytics Engine (log-tail + EMA + WebSocket)
+After=network.target nginx.service
+
+[Service]
+ExecStart=/usr/bin/python3 /usr/local/bin/phoenix-analytics.py
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

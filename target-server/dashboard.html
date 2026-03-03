@@ -1,0 +1,219 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Phoenix — Live Analytics</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:#060609;color:#ccc;font-family:'Courier New',monospace;overflow-x:hidden}
+.topbar{background:#0d0d15;border-bottom:2px solid #f8b918;padding:14px 28px;display:flex;align-items:center;justify-content:space-between;position:sticky;top:0;z-index:10}
+.topbar h1{color:#f8b918;font-size:1.1rem;letter-spacing:.15em}
+.ws-status{font-size:.75rem;display:flex;align-items:center;gap:6px}
+.dot{width:8px;height:8px;border-radius:50%;background:#666;transition:background .3s}
+.dot.live{background:#4f4;box-shadow:0 0 6px #4f4;animation:pulse 2s infinite}
+.dot.error{background:#f44}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.5}}
+
+.alert{display:none;background:#2a0505;border:2px solid #f44;border-radius:6px;padding:10px 20px;margin:12px 28px;color:#f88;font-size:.9rem;font-weight:bold;letter-spacing:.05em;animation:flash .5s infinite alternate}
+.alert.show{display:block}
+@keyframes flash{from{border-color:#f44}to{border-color:#ff8}}
+
+.metrics{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;padding:20px 28px}
+.m{background:#0d0d15;border:1px solid #1a1a2a;border-radius:8px;padding:18px;text-align:center;transition:border-color .3s}
+.m.hot{border-color:#f44!important}
+.m-val{font-size:2.4rem;font-weight:bold;color:#f8b918;font-variant-numeric:tabular-nums;transition:color .3s}
+.m-val.hot{color:#f44}
+.m-label{font-size:.7rem;color:#555;text-transform:uppercase;letter-spacing:.2em;margin-top:5px}
+.m-sub{font-size:.75rem;color:#666;margin-top:3px}
+
+.row{display:grid;grid-template-columns:2fr 1fr;gap:12px;padding:0 28px 12px}
+.panel{background:#0d0d15;border:1px solid #1a1a2a;border-radius:8px;padding:16px}
+.panel h3{color:#f8b918;font-size:.72rem;letter-spacing:.2em;text-transform:uppercase;margin-bottom:12px;border-bottom:1px solid #1a1a2a;padding-bottom:8px}
+
+/* Sparkline */
+#chart{width:100%;height:120px;position:relative;overflow:hidden}
+svg{width:100%;height:100%}
+polyline{fill:none;stroke:#f8b918;stroke-width:1.5;vector-effect:non-scaling-stroke}
+.chart-zero{stroke:#1a1a2a;stroke-width:1;stroke-dasharray:4 4}
+
+/* Log */
+#logbox{height:160px;overflow-y:auto;font-size:.72rem}
+.ll{padding:2px 0;border-bottom:1px solid #0d0d15;display:flex;gap:10px;align-items:baseline}
+.ll .ts{color:#444;flex-shrink:0}
+.ll .rps-v{color:#f8b918;font-weight:bold;width:70px;text-align:right;flex-shrink:0}
+.ll .detail{color:#666;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+
+/* Tables */
+.tbl{width:100%;border-collapse:collapse;font-size:.75rem}
+.tbl td{padding:4px 8px;border-bottom:1px solid #0d0d15}
+.tbl td:last-child{color:#f8b918;text-align:right;font-weight:bold}
+.tbl td:first-child{color:#888;overflow:hidden;text-overflow:ellipsis;max-width:120px}
+
+/* Latency */
+.lat-row{display:flex;justify-content:space-between;padding:5px 0;border-bottom:1px solid #0d0d15;font-size:.8rem}
+.lat-row span:first-child{color:#666}
+.lat-row span:last-child{color:#4af;font-weight:bold}
+
+footer{text-align:center;padding:16px;color:#222;font-size:.7rem;margin-top:8px;border-top:1px solid #0d0d15}
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <h1>🔥 PHOENIX — LIVE ANALYTICS</h1>
+  <div class="ws-status">
+    <div class="dot" id="dot"></div>
+    <span id="ws-label">Connecting…</span>
+  </div>
+</div>
+
+<div id="alert" class="alert">⚠ HIGH TRAFFIC — POSSIBLE ATTACK IN PROGRESS</div>
+
+<div class="metrics">
+  <div class="m" id="m-rps">
+    <div class="m-val" id="v-rps">0</div>
+    <div class="m-label">Req / sec (EMA)</div>
+    <div class="m-sub" id="v-peak">Peak: 0</div>
+  </div>
+  <div class="m">
+    <div class="m-val" id="v-total">0</div>
+    <div class="m-label">Total Requests</div>
+    <div class="m-sub">HTTP/2 streams</div>
+  </div>
+  <div class="m">
+    <div class="m-val" id="v-conns">0</div>
+    <div class="m-label">Active Connections</div>
+    <div class="m-sub">unique TCP conns</div>
+  </div>
+  <div class="m" id="m-err">
+    <div class="m-val" id="v-err">0%</div>
+    <div class="m-label">Error Rate</div>
+    <div class="m-sub" id="v-err-count">0 errors</div>
+  </div>
+</div>
+
+<div class="row">
+  <div class="panel">
+    <h3>RPS Sparkline (last 60 samples × 200ms)</h3>
+    <div id="chart">
+      <svg id="svg" viewBox="0 0 600 120" preserveAspectRatio="none">
+        <line class="chart-zero" x1="0" y1="119" x2="600" y2="119"/>
+        <polyline id="poly" points=""/>
+      </svg>
+    </div>
+  </div>
+  <div class="panel">
+    <h3>Latency (ms)</h3>
+    <div class="lat-row"><span>p50</span><span id="l-p50">—</span></div>
+    <div class="lat-row"><span>p95</span><span id="l-p95">—</span></div>
+    <div class="lat-row"><span>p99</span><span id="l-p99">—</span></div>
+    <div class="lat-row"><span>mean</span><span id="l-mean">—</span></div>
+  </div>
+</div>
+
+<div class="row">
+  <div class="panel">
+    <h3>Live Request Log</h3>
+    <div id="logbox"></div>
+  </div>
+  <div class="panel">
+    <h3>Top URIs</h3>
+    <table class="tbl" id="uri-tbl"></table>
+    <h3 style="margin-top:14px">Status Codes</h3>
+    <table class="tbl" id="status-tbl"></table>
+  </div>
+</div>
+
+<footer>Phoenix Analytics · EMA α=0.3 · 5s sliding window · log-based (each line = 1 HTTP/2 stream)</footer>
+
+<script>
+const WS_URL = `wss://${location.host}/ws`;
+let ws, reconnectTimer;
+const timeline = [];
+
+function connect() {
+  ws = new WebSocket(WS_URL);
+  ws.onopen = () => {
+    document.getElementById('dot').className = 'dot live';
+    document.getElementById('ws-label').textContent = 'LIVE';
+    clearTimeout(reconnectTimer);
+  };
+  ws.onclose = ws.onerror = () => {
+    document.getElementById('dot').className = 'dot error';
+    document.getElementById('ws-label').textContent = 'Reconnecting…';
+    reconnectTimer = setTimeout(connect, 2000);
+  };
+  ws.onmessage = ({data}) => {
+    const d = JSON.parse(data);
+    render(d);
+  };
+}
+
+function fmt(n) {
+  if (n >= 1e6) return (n/1e6).toFixed(1)+'M';
+  if (n >= 1e3) return (n/1e3).toFixed(1)+'K';
+  return n.toString();
+}
+
+function render(d) {
+  // Big metrics
+  const rpsEl = document.getElementById('v-rps');
+  rpsEl.textContent = d.rps.toFixed(1);
+  const hot = d.attack;
+  rpsEl.className = 'm-val' + (hot ? ' hot' : '');
+  document.getElementById('m-rps').className = 'm' + (hot ? ' hot' : '');
+  document.getElementById('v-peak').textContent = 'Peak: ' + d.rps_peak;
+  document.getElementById('v-total').textContent = fmt(d.total);
+  document.getElementById('v-conns').textContent = d.connections;
+  document.getElementById('v-err').textContent = d.error_rate + '%';
+  document.getElementById('v-err-count').textContent = fmt(d.errors) + ' errors';
+  document.getElementById('m-err').className = 'm' + (d.error_rate > 5 ? ' hot' : '');
+
+  // Alert
+  document.getElementById('alert').className = 'alert' + (hot ? ' show' : '');
+
+  // Latency
+  const l = d.latency;
+  document.getElementById('l-p50').textContent  = l.p50  + ' ms';
+  document.getElementById('l-p95').textContent  = l.p95  + ' ms';
+  document.getElementById('l-p99').textContent  = l.p99  + ' ms';
+  document.getElementById('l-mean').textContent = l.mean + ' ms';
+
+  // Sparkline
+  const tl = d.timeline;
+  if (tl.length > 1) {
+    const maxRps = Math.max(1, ...tl.map(p => p.rps));
+    const W = 600, H = 120, pad = 4;
+    const pts = tl.map((p, i) => {
+      const x = (i / (tl.length - 1)) * W;
+      const y = H - pad - ((p.rps / maxRps) * (H - pad * 2));
+      return `${x.toFixed(1)},${y.toFixed(1)}`;
+    }).join(' ');
+    document.getElementById('poly').setAttribute('points', pts);
+  }
+
+  // Log
+  const lb = document.getElementById('logbox');
+  const ll = document.createElement('div');
+  ll.className = 'll';
+  const ts = new Date().toISOString().slice(11,19);
+  ll.innerHTML = `<span class="ts">${ts}</span><span class="rps-v">${d.rps.toFixed(1)} rps</span><span class="detail">total=${fmt(d.total)} conns=${d.connections} err=${d.error_rate}% lat_p99=${l.p99}ms</span>`;
+  lb.insertBefore(ll, lb.firstChild);
+  while (lb.children.length > 80) lb.removeChild(lb.lastChild);
+
+  // Top URIs
+  const ut = document.getElementById('uri-tbl');
+  ut.innerHTML = Object.entries(d.top_uri).sort((a,b)=>b[1]-a[1]).slice(0,5)
+    .map(([u,c])=>`<tr><td>${u}</td><td>${fmt(c)}</td></tr>`).join('');
+
+  // Status codes
+  const st = document.getElementById('status-tbl');
+  st.innerHTML = Object.entries(d.by_status).sort((a,b)=>b[1]-a[1])
+    .map(([s,c])=>`<tr><td>HTTP ${s}</td><td>${fmt(c)}</td></tr>`).join('');
+}
+
+connect();
+</script>
+</body>
+</html>

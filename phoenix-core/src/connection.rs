@@ -231,10 +231,13 @@ impl RawH2TlsConnection {
     ) -> Result<tokio_rustls::client::TlsStream<TcpStream>> {
         // Use no-op verifier — accepts self-signed certs for test targets.
         // For production scanning, swap NoVerifier for webpki_roots store.
-        let config = ClientConfig::builder()
+        let mut config = ClientConfig::builder()
             .dangerous()
             .with_custom_certificate_verifier(Arc::new(NoVerifier))
             .with_no_client_auth();
+
+        // Advertise HTTP/2 via ALPN — without this nginx won't negotiate h2
+        config.alpn_protocols = vec![b"h2".to_vec()];
         
         let server_name = ServerName::try_from(host.to_string())
             .map_err(|e| PhoenixError::Tls(e.into()))?;

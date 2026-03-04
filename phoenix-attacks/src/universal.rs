@@ -68,7 +68,7 @@ impl Attack for UniversalAttack {
         let mode         = self.mode.clone();
         let n_cores      = num_cpus::get();
         // HTTP/2 concurrent streams per connection (nginx default max = 128)
-        let streams      = 32usize;
+        let streams      = 64usize;
 
         info!(
             "Phoenix: {} cores × {} conns × {} streams = {} concurrent req/s ceiling",

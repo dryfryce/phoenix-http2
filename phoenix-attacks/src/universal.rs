@@ -124,9 +124,10 @@ impl Attack for UniversalAttack {
                                     match client.get(&target).send().await {
                                         Ok(resp) => {
                                             let ok = resp.status().as_u16() < 400;
-                                            // Drop response immediately — releases stream slot
-                                            // Don't read body — saves bandwidth + CPU
-                                            drop(resp);
+                                            // MUST consume body to cleanly release HTTP/2 stream slot.
+                                            // drop(resp) without this leaves stream in zombie state,
+                                            // filling all 32 slots and blocking new requests.
+                                            let _ = resp.bytes().await;
                                             let lat = t0.elapsed().as_micros() as u64;
                                             metrics.record_request(lat, ok, 0).await;
                                             if ok { ok_c.fetch_add(1, Ordering::Relaxed); }

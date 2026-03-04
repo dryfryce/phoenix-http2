@@ -9,6 +9,10 @@ Phoenix Analytics Engine
 import asyncio, json, time, collections, os, math
 from pathlib import Path
 import websockets
+try:
+    import urllib.request as _ur
+except ImportError:
+    _ur = None
 
 LOG_FILE   = "/var/log/nginx/access.json.log"
 WS_HOST    = "0.0.0.0"
@@ -17,8 +21,18 @@ EMA_ALPHA  = 0.3          # smoothing factor (0=smooth, 1=raw)
 WINDOW_S   = 5            # sliding window for peak/avg
 PUSH_EVERY = 0.2          # push to clients every 200ms
 
+# Node metrics agents (port 9002 on each VPS)
+NODES = {
+    "target": "http://127.0.0.1:9002/metrics",
+    "attack": "http://185.203.240.191:9002/metrics",
+}
+
 # ── State ────────────────────────────────────────────────────────────────────
 clients   = set()
+node_metrics = {
+    "target": {"cpu": 0.0, "ram_used_mb": 0, "ram_total_mb": 0, "ram_pct": 0.0},
+    "attack": {"cpu": 0.0, "ram_used_mb": 0, "ram_total_mb": 0, "ram_pct": 0.0},
+}
 state = {
     "rps":        0.0,
     "rps_peak":   0.0,
@@ -87,6 +101,21 @@ def parse_line(line: str):
 
     conn = r.get("conn", 0)
     state["connections"][conn] = time.monotonic()
+
+# ── Poll node metrics agents ─────────────────────────────────────────────────
+async def poll_node_metrics():
+    loop = asyncio.get_event_loop()
+    while True:
+        for name, url in NODES.items():
+            try:
+                data = await loop.run_in_executor(
+                    None,
+                    lambda u=url: json.loads(_ur.urlopen(u, timeout=1).read())
+                )
+                node_metrics[name].update(data)
+            except Exception:
+                pass  # agent unreachable — keep last value
+        await asyncio.sleep(1)
 
 # ── Tail the log file ────────────────────────────────────────────────────────
 async def tail_log():
@@ -164,6 +193,7 @@ async def broadcast_loop():
             "by_status":   by_status,
             "timeline":    list(state["timeline"])[-60:],  # last 60 samples
             "attack":      state["rps"] > 500,
+            "nodes":       node_metrics,
         })
 
         dead = set()
@@ -191,6 +221,7 @@ async def main():
         await asyncio.gather(
             tail_log(),
             broadcast_loop(),
+            poll_node_metrics(),
         )
 
 if __name__ == "__main__":

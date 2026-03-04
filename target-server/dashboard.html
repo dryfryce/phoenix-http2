@@ -28,6 +28,7 @@ body{background:#060609;color:#ccc;font-family:'Courier New',monospace;overflow-
 .m-sub{font-size:.75rem;color:#666;margin-top:3px}
 
 .row{display:grid;grid-template-columns:2fr 1fr;gap:12px;padding:0 28px 12px}
+.row3{display:grid;grid-template-columns:1fr 1fr;gap:12px;padding:0 28px 12px}
 .panel{background:#0d0d15;border:1px solid #1a1a2a;border-radius:8px;padding:16px}
 .panel h3{color:#f8b918;font-size:.72rem;letter-spacing:.2em;text-transform:uppercase;margin-bottom:12px;border-bottom:1px solid #1a1a2a;padding-bottom:8px}
 
@@ -55,20 +56,36 @@ polyline{fill:none;stroke:#f8b918;stroke-width:1.5;vector-effect:non-scaling-str
 .lat-row span:first-child{color:#666}
 .lat-row span:last-child{color:#4af;font-weight:bold}
 
+/* Node gauges */
+.node-card{background:#0d0d15;border:1px solid #1a1a2a;border-radius:8px;padding:16px}
+.node-title{font-size:.72rem;letter-spacing:.2em;text-transform:uppercase;margin-bottom:12px;border-bottom:1px solid #1a1a2a;padding-bottom:8px}
+.node-title.attack{color:#f44}
+.node-title.target{color:#4af}
+.gauge-row{margin-bottom:12px}
+.gauge-label{display:flex;justify-content:space-between;font-size:.75rem;margin-bottom:4px}
+.gauge-label span:first-child{color:#666}
+.gauge-label span:last-child{color:#f8b918;font-weight:bold}
+.gauge-track{background:#0a0a12;border-radius:4px;height:10px;overflow:hidden;border:1px solid #1a1a2a}
+.gauge-fill{height:100%;border-radius:4px;transition:width .6s ease}
+.gauge-fill.cpu{background:linear-gradient(90deg,#f8b918,#f44)}
+.gauge-fill.ram{background:linear-gradient(90deg,#4af,#a4f)}
+.gauge-fill.warn{background:#f44}
+.node-stat{font-size:.72rem;color:#444;margin-top:8px}
+
 footer{text-align:center;padding:16px;color:#222;font-size:.7rem;margin-top:8px;border-top:1px solid #0d0d15}
 </style>
 </head>
 <body>
 
 <div class="topbar">
-  <h1>🔥 PHOENIX — LIVE ANALYTICS</h1>
+  <h1>PHOENIX — LIVE ANALYTICS</h1>
   <div class="ws-status">
     <div class="dot" id="dot"></div>
     <span id="ws-label">Connecting…</span>
   </div>
 </div>
 
-<div id="alert" class="alert">⚠ HIGH TRAFFIC — POSSIBLE ATTACK IN PROGRESS</div>
+<div id="alert" class="alert">HIGH TRAFFIC — POSSIBLE ATTACK IN PROGRESS</div>
 
 <div class="metrics">
   <div class="m" id="m-rps">
@@ -90,6 +107,34 @@ footer{text-align:center;padding:16px;color:#222;font-size:.7rem;margin-top:8px;
     <div class="m-val" id="v-err">0%</div>
     <div class="m-label">Error Rate</div>
     <div class="m-sub" id="v-err-count">0 errors</div>
+  </div>
+</div>
+
+<!-- Node CPU / RAM gauges -->
+<div class="row3">
+  <div class="node-card">
+    <div class="node-title attack">Attack VPS — 185.203.240.191 (24 cores / 58GB)</div>
+    <div class="gauge-row">
+      <div class="gauge-label"><span>CPU Usage</span><span id="a-cpu-pct">—</span></div>
+      <div class="gauge-track"><div class="gauge-fill cpu" id="a-cpu-bar" style="width:0%"></div></div>
+    </div>
+    <div class="gauge-row">
+      <div class="gauge-label"><span>RAM Usage</span><span id="a-ram-pct">—</span></div>
+      <div class="gauge-track"><div class="gauge-fill ram" id="a-ram-bar" style="width:0%"></div></div>
+    </div>
+    <div class="node-stat" id="a-ram-detail">— MB / — MB</div>
+  </div>
+  <div class="node-card">
+    <div class="node-title target">Target VPS — 81.91.177.199 (12 cores / 29GB)</div>
+    <div class="gauge-row">
+      <div class="gauge-label"><span>CPU Usage</span><span id="t-cpu-pct">—</span></div>
+      <div class="gauge-track"><div class="gauge-fill cpu" id="t-cpu-bar" style="width:0%"></div></div>
+    </div>
+    <div class="gauge-row">
+      <div class="gauge-label"><span>RAM Usage</span><span id="t-ram-pct">—</span></div>
+      <div class="gauge-track"><div class="gauge-fill ram" id="t-ram-bar" style="width:0%"></div></div>
+    </div>
+    <div class="node-stat" id="t-ram-detail">— MB / — MB</div>
   </div>
 </div>
 
@@ -125,12 +170,11 @@ footer{text-align:center;padding:16px;color:#222;font-size:.7rem;margin-top:8px;
   </div>
 </div>
 
-<footer>Phoenix Analytics · EMA α=0.3 · 5s sliding window · log-based (each line = 1 HTTP/2 stream)</footer>
+<footer>Phoenix Analytics · EMA α=0.3 · 5s sliding window · Node metrics polled every 1s</footer>
 
 <script>
 const WS_URL = `wss://${location.host}/ws`;
 let ws, reconnectTimer;
-const timeline = [];
 
 function connect() {
   ws = new WebSocket(WS_URL);
@@ -144,10 +188,7 @@ function connect() {
     document.getElementById('ws-label').textContent = 'Reconnecting…';
     reconnectTimer = setTimeout(connect, 2000);
   };
-  ws.onmessage = ({data}) => {
-    const d = JSON.parse(data);
-    render(d);
-  };
+  ws.onmessage = ({data}) => render(JSON.parse(data));
 }
 
 function fmt(n) {
@@ -156,11 +197,24 @@ function fmt(n) {
   return n.toString();
 }
 
+function setGauge(prefix, cpu, ramPct, ramUsed, ramTotal) {
+  const cpuBar = document.getElementById(prefix+'-cpu-bar');
+  const ramBar = document.getElementById(prefix+'-ram-bar');
+  document.getElementById(prefix+'-cpu-pct').textContent = cpu.toFixed(1) + '%';
+  document.getElementById(prefix+'-ram-pct').textContent = ramPct.toFixed(1) + '%';
+  document.getElementById(prefix+'-ram-detail').textContent = ramUsed + ' MB / ' + ramTotal + ' MB';
+  cpuBar.style.width = Math.min(cpu, 100) + '%';
+  cpuBar.className = 'gauge-fill cpu' + (cpu > 85 ? ' warn' : '');
+  ramBar.style.width = Math.min(ramPct, 100) + '%';
+  ramBar.className = 'gauge-fill ram' + (ramPct > 90 ? ' warn' : '');
+}
+
 function render(d) {
+  const hot = d.attack;
+
   // Big metrics
   const rpsEl = document.getElementById('v-rps');
   rpsEl.textContent = d.rps.toFixed(1);
-  const hot = d.attack;
   rpsEl.className = 'm-val' + (hot ? ' hot' : '');
   document.getElementById('m-rps').className = 'm' + (hot ? ' hot' : '');
   document.getElementById('v-peak').textContent = 'Peak: ' + d.rps_peak;
@@ -180,6 +234,14 @@ function render(d) {
   document.getElementById('l-p99').textContent  = l.p99  + ' ms';
   document.getElementById('l-mean').textContent = l.mean + ' ms';
 
+  // Node gauges
+  if (d.nodes) {
+    const a = d.nodes.attack;
+    const t = d.nodes.target;
+    setGauge('a', a.cpu, a.ram_pct, a.ram_used_mb, a.ram_total_mb);
+    setGauge('t', t.cpu, t.ram_pct, t.ram_used_mb, t.ram_total_mb);
+  }
+
   // Sparkline
   const tl = d.timeline;
   if (tl.length > 1) {
@@ -198,7 +260,8 @@ function render(d) {
   const ll = document.createElement('div');
   ll.className = 'll';
   const ts = new Date().toISOString().slice(11,19);
-  ll.innerHTML = `<span class="ts">${ts}</span><span class="rps-v">${d.rps.toFixed(1)} rps</span><span class="detail">total=${fmt(d.total)} conns=${d.connections} err=${d.error_rate}% lat_p99=${l.p99}ms</span>`;
+  const nodeInfo = d.nodes ? ` atk_cpu=${d.nodes.attack.cpu.toFixed(0)}% tgt_cpu=${d.nodes.target.cpu.toFixed(0)}%` : '';
+  ll.innerHTML = `<span class="ts">${ts}</span><span class="rps-v">${d.rps.toFixed(1)} rps</span><span class="detail">conns=${d.connections} err=${d.error_rate}% p99=${l.p99}ms${nodeInfo}</span>`;
   lb.insertBefore(ll, lb.firstChild);
   while (lb.children.length > 80) lb.removeChild(lb.lastChild);
 

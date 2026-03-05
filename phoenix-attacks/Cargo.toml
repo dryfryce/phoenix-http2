@@ -27,6 +27,7 @@ num_cpus      = "1"
 
 tokio-rustls  = "0.25"
 rustls        = { version = "0.23", features = ["ring"] }
+rustls-pki-types = "1"
 hyper = { version = "0.14", features = ["http2"] }
 http = "0.2"
 url = "2"

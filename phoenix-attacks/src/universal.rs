@@ -182,8 +182,8 @@ static PROFILES: &[BrowserProfile] = &[
 // ── Proxy config ──────────────────────────────────────────────────────────────
 const PROXY_HOST: &str = "schro.quantumproxies.net";
 const PROXY_PORT: u16  = 1111;
-const PROXY_USER: &str = "Quantum-wayybcf1";
-const PROXY_PASS: &str = "y1tSX1V7h9xjxY4tYPGo";
+const PROXY_USER: &str = "Quantum-e1hfitlm";
+const PROXY_PASS: &str = "RVV5ChLozFkoL9BfrU7o";
 
 static COUNTRIES: &[&str] = &[
     "US","GB","DE","FR","JP","CA","AU","BR","IN","IT",

